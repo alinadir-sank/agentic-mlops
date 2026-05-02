@@ -22,7 +22,11 @@ kubernetes>=29.0.0
 # azure-ai-ml>=1.13.0
 
 # MLflow (optional — install if METRICS_SOURCE=mlflow)
-# mlflow>=2.11.0
+mlflow>=2.11.0
 
 # SendGrid (optional — install if ALERT_EMAIL_PROVIDER=sendgrid)
 # sendgrid>=6.11.0
+
+# for testing pipeline
+scikit-learn
+pandas
