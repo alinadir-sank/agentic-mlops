@@ -54,7 +54,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from dotenv import load_dotenv
 load_dotenv()
 
-from rag.store import RAGStore
+from mlops_agents.rag.store import RAGStore
 
 logging.basicConfig(
     level="INFO",

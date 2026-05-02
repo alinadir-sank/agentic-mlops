@@ -69,8 +69,8 @@ def run_pipeline(
     Returns:
         Final AgentState dict.
     """
-    from rag.store import RAGStore
-    from graph.workflow import build_graph
+    from mlops_agents.rag.store import RAGStore
+    from mlops_agents.graph.workflow import build_graph
 
     thread_id = thread_id or str(uuid.uuid4())
     logger.info(
@@ -128,8 +128,8 @@ def resume_pipeline(thread_id: str, approve: bool) -> dict:
         thread_id: The thread ID of the interrupted run.
         approve:   True to approve remediation, False to reject.
     """
-    from rag.store import RAGStore
-    from graph.workflow import build_graph
+    from mlops_agents.rag.store import RAGStore
+    from mlops_agents.graph.workflow import build_graph
 
     logger.info(
         "Resuming pipeline | thread=%s approved=%s", thread_id, approve
@@ -207,7 +207,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "init":
-        from rag.init_collections import init_collections
+        from mlops_agents.rag.init_collections import init_collections
         init_collections()
         print("✅  ChromaDB collections initialised.")
         return
