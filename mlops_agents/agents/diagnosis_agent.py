@@ -46,11 +46,34 @@ You MUST respond with ONLY a valid JSON object — no preamble, no explanation, 
 JSON schema:
 {
   "root_cause": "<concise one-sentence root cause>",
-  "evidence": ["<evidence point 1>", "<evidence point 2>", ...],
+  "root_cause_category": "<one of: concept_drift | data_drift | model_staleness | infrastructure | data_quality | unknown>",
+  "evidence": ["<evidence point 1>", "<evidence point 2>"],
   "recommended_action": "<one of: retrain | rollback | scale | investigate>",
-  "confidence": <float between 0.0 and 1.0>,
-  "reasoning": "<2-3 sentence reasoning chain>"
-}"""
+  "confidence": <float 0.0-1.0>,
+  "reasoning": "<2-3 sentence reasoning chain>",
+  "retrain_prescription": {
+    "data_strategy": "<one of: recent_window | full_history | weighted_recent | drift_period_only>",
+    "window_days": <integer — how many days of data to train on>,
+    "drift_period_weight": <float — upsampling weight for drift period data, 1.0 = no upsampling>,
+    "exclude_before": "<ISO-8601 date or empty string>",
+    "refit_preprocessors": <boolean>,
+    "drifted_features": ["<feature names that drifted>"],
+    "optimize_for": "<one of: f2_score | roc_auc | recall | precision>",
+    "target_recall": <float 0.0-1.0>,
+    "target_roc_auc": <float 0.0-1.0>,
+    "deployment_strategy": "<one of: canary | blue_green | immediate>",
+    "canary_traffic_pct": <integer 1-50>,
+    "shadow_period_hours": <integer>
+  }
+}
+
+Rules for retrain_prescription:
+- Only populate if recommended_action is "retrain". Set to null otherwise.
+- window_days: derive from when drift started. If drift onset was recent (< 7 days), use 14. If gradual (weeks), use 30-60.
+- drift_period_weight: set to 2.0 if drift_score > 0.4, 1.5 if 0.2-0.4, 1.0 otherwise.
+- optimize_for: use recall for fraud/safety models, roc_auc for general classifiers.
+- deployment_strategy: use canary for critical severity, immediate for minor.
+- target_recall: set 0.05-0.10 above the current degraded recall value."""
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +189,28 @@ def _parse_diagnosis(raw: str) -> dict[str, Any]:
     confidence = float(parsed.get("confidence", 0.5))
     parsed["confidence"] = max(0.0, min(1.0, confidence))
 
+    # Extract and validate retrain prescription
+    prescription = parsed.get("retrain_prescription")
+    if parsed.get("recommended_action") == "retrain" and prescription:
+        # clamp numeric fields to sane ranges
+        prescription["window_days"]         = max(7, min(int(prescription.get("window_days", 30)), 180))
+        prescription["drift_period_weight"] = max(1.0, min(float(prescription.get("drift_period_weight", 1.0)), 5.0))
+        prescription["target_recall"]       = max(0.0, min(float(prescription.get("target_recall", 0.80)), 1.0))
+        prescription["target_roc_auc"]      = max(0.0, min(float(prescription.get("target_roc_auc", 0.88)), 1.0))
+        prescription["canary_traffic_pct"]  = max(1, min(int(prescription.get("canary_traffic_pct", 10)), 50))
+        prescription["shadow_period_hours"] = max(0, int(prescription.get("shadow_period_hours", 2)))
+
+        if prescription.get("deployment_strategy") not in ("canary", "blue_green", "immediate"):
+            prescription["deployment_strategy"] = "canary"
+        if prescription.get("optimize_for") not in ("f2_score", "roc_auc", "recall", "precision"):
+            prescription["optimize_for"] = "recall"
+        if prescription.get("data_strategy") not in ("recent_window", "full_history", "weighted_recent", "drift_period_only"):
+            prescription["data_strategy"] = "recent_window"
+
+        parsed["retrain_prescription"] = prescription
+    else:
+        parsed["retrain_prescription"] = None
+
     return parsed
 
 
@@ -189,10 +234,25 @@ def _fallback_diagnosis(metrics: dict, severity: str) -> dict[str, Any]:
     if accuracy is not None and accuracy < 0.70:
         return {
             "root_cause": "Model accuracy has degraded significantly.",
+            "root_cause_category": "model_staleness",
             "evidence": [f"Accuracy {accuracy:.3f} is below acceptable threshold."],
             "recommended_action": "retrain",
             "confidence": 0.4,
             "reasoning": "Low accuracy with no other signals suggests model staleness.",
+            "retrain_prescription": {
+                "data_strategy":       "recent_window",
+                "window_days":         30,
+                "drift_period_weight": 1.5,
+                "exclude_before":      "",
+                "refit_preprocessors": True,
+                "drifted_features":    [],
+                "optimize_for":        "recall",
+                "target_recall":       0.80,
+                "target_roc_auc":      0.88,
+                "deployment_strategy": "canary",
+                "canary_traffic_pct":  10,
+                "shadow_period_hours": 2,
+            },
         }
     if latency is not None and latency > 1500:
         return {
@@ -322,22 +382,25 @@ Remember: reply with ONLY the JSON object."""
         diagnosis_text = diagnosis_json["root_cause"]
 
     # ── 5. Update state ─────────────────────────────────────────────────────
+    prescription = diagnosis_json.get("retrain_prescription")
+    drifted      = prescription.get("drifted_features", []) if prescription else []
+
     return {
         **state,
-        "diagnosis": diagnosis_text,
-        "diagnosis_json": diagnosis_json,
-        "recommended_action": diagnosis_json["recommended_action"],
-        "similar_incidents": similar_incidents,
-        "relevant_runbooks": relevant_runbooks,
-        "messages": state.get("messages", [])
-        + [
+        "diagnosis":             diagnosis_text,
+        "diagnosis_json":        diagnosis_json,
+        "recommended_action":    diagnosis_json["recommended_action"],
+        "retrain_prescription":  prescription,
+        "drifted_features":      drifted,
+        "similar_incidents":     similar_incidents,
+        "relevant_runbooks":     relevant_runbooks,
+        "messages": state.get("messages", []) + [
             HumanMessage(
                 content=(
                     f"[Diagnosis] root_cause='{diagnosis_text}' "
                     f"action={diagnosis_json['recommended_action']} "
                     f"confidence={diagnosis_json.get('confidence', 0.0):.2f} "
-                    f"(rag: {len(similar_incidents)} incidents, "
-                    f"{len(relevant_runbooks)} runbooks)"
+                    f"prescription={'yes' if prescription else 'none'}"
                 )
             )
         ],

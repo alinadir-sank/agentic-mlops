@@ -51,3 +51,8 @@ class AgentState(TypedDict, total=False):
 
     # ── LangGraph message history ────────────────────────────────────────────
     messages: Annotated[list, add_messages]
+
+    # ── Retrain prescription (Diagnosis Agent → Remediation Agent) ──────────
+    retrain_prescription: Optional[dict]   # full structured prescription
+    drift_onset_at: Optional[str]          # ISO-8601 — when drift started
+    drifted_features: Optional[list[str]]  # feature names with high drift
