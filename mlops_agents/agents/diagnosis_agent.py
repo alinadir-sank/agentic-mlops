@@ -73,7 +73,13 @@ Rules for retrain_prescription:
 - drift_period_weight: set to 2.0 if drift_score > 0.4, 1.5 if 0.2-0.4, 1.0 otherwise.
 - optimize_for: use recall for fraud/safety models, roc_auc for general classifiers.
 - deployment_strategy: use canary for critical severity, immediate for minor.
-- target_recall: set 0.05-0.10 above the current degraded recall value."""
+- target_recall: set 0.05-0.10 above the current degraded recall value.
+
+Root cause category rules:
+- drift_score high + accuracy gradual decline → data_drift (covariate shift)
+- drift_score moderate + recall collapse sudden → concept_drift (label relationship changed)
+- drift_score high + recall collapse + error_rate rising → both (severe, use drift_period_only strategy)
+- latency spike + accuracy stable → infrastructure (scale, not retrain)"""
 
 
 # ---------------------------------------------------------------------------
