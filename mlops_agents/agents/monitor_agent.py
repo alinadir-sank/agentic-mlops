@@ -51,43 +51,68 @@ THRESHOLDS = {
 # Severity classifier
 # ---------------------------------------------------------------------------
 
-def _rule_based_severity(metrics: dict) -> str | None:
+def _default_thresholds() -> dict:
+    """Resolve environment-backed default thresholds."""
+    return {
+        "accuracy_critical":   THRESHOLDS["accuracy_critical"](),
+        "accuracy_major":      THRESHOLDS["accuracy_major"](),
+        "accuracy_minor":      THRESHOLDS["accuracy_minor"](),
+        "drift_critical":      THRESHOLDS["drift_critical"](),
+        "drift_major":         THRESHOLDS["drift_major"](),
+        "drift_minor":         THRESHOLDS["drift_minor"](),
+        "latency_critical_ms": THRESHOLDS["latency_critical_ms"](),
+        "latency_major_ms":    THRESHOLDS["latency_major_ms"](),
+        "error_rate_critical": THRESHOLDS["error_rate_critical"](),
+        "error_rate_major":    THRESHOLDS["error_rate_major"](),
+    }
+
+
+def _get_thresholds(model_id: str, rag: RAGStore) -> dict:
     """
-    Apply deterministic threshold rules.
-    Returns a severity string or None if the case is ambiguous (grey-zone).
+    Fetch dynamic thresholds from RAG if available.
+    Fallback to environment defaults.
     """
+    try:
+        dynamic = rag.get_dynamic_thresholds(model_id=model_id)
+        if dynamic:
+            logger.info("Using dynamic thresholds from RAG (model=%s)", model_id)
+            return dynamic
+    except Exception as e:
+        logger.warning("Failed to load dynamic thresholds: %s", e)
+
+    logger.info("Using default thresholds (model=%s)", model_id)
+    return _default_thresholds()
+
+
+def _rule_based_severity(metrics: dict, thresholds: dict) -> str | None:
     accuracy = metrics.get("accuracy")
     drift = metrics.get("drift_score")
     latency = metrics.get("latency_p99_ms")
     error_rate = metrics.get("error_rate")
 
-    # Critical — any single metric breaches the critical threshold
     if (
-        (accuracy is not None and accuracy < THRESHOLDS["accuracy_critical"]())
-        or (drift is not None and drift > THRESHOLDS["drift_critical"]())
-        or (latency is not None and latency > THRESHOLDS["latency_critical_ms"]())
-        or (error_rate is not None and error_rate > THRESHOLDS["error_rate_critical"]())
+        (accuracy is not None and accuracy < thresholds["accuracy_critical"])
+        or (drift is not None and drift > thresholds["drift_critical"])
+        or (latency is not None and latency > thresholds["latency_critical_ms"])
+        or (error_rate is not None and error_rate > thresholds["error_rate_critical"])
     ):
         return "critical"
 
-    # Healthy — all available metrics are within minor thresholds
     all_ok = all([
-        accuracy is None or accuracy >= THRESHOLDS["accuracy_minor"](),
-        drift is None or drift <= THRESHOLDS["drift_minor"](),
-        latency is None or latency <= THRESHOLDS["latency_major_ms"](),
-        error_rate is None or error_rate <= THRESHOLDS["error_rate_major"](),
+        accuracy is None or accuracy >= thresholds["accuracy_minor"],
+        drift is None or drift <= thresholds["drift_minor"],
+        latency is None or latency <= thresholds["latency_major_ms"],
+        error_rate is None or error_rate <= thresholds["error_rate_major"],
     ])
     if all_ok:
         return "none"
 
-    # Clear major
     if (
-        (accuracy is not None and accuracy < THRESHOLDS["accuracy_major"]())
-        or (drift is not None and drift > THRESHOLDS["drift_major"]())
+        (accuracy is not None and accuracy < thresholds["accuracy_major"])
+        or (drift is not None and drift > thresholds["drift_major"])
     ):
         return "major"
 
-    # Ambiguous — let the LLM decide
     return None
 
 
@@ -200,7 +225,11 @@ def monitor_agent(state: AgentState, rag: RAGStore) -> AgentState:
     )
 
     # ── 3. Severity classification ──────────────────────────────────────────
-    severity = _rule_based_severity(metrics)
+    # severity = _rule_based_severity(metrics)
+    thresholds = _get_thresholds(model_id, rag)
+    logger.info("Thresholds used: %s", thresholds)
+
+    severity = _rule_based_severity(metrics, thresholds)
     classification_method = "rule-based"
 
     if severity is None:
@@ -220,6 +249,7 @@ def monitor_agent(state: AgentState, rag: RAGStore) -> AgentState:
         **state,
         "metrics": metrics,
         "severity": severity,
+        "thresholds": thresholds,
         "messages": state.get("messages", [])
         + [
             HumanMessage(

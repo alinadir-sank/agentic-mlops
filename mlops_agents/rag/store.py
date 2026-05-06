@@ -116,6 +116,34 @@ class RAGStore:
     def _flatten_meta(self, d: dict) -> dict:
         return {k: self._safe_meta(v) for k, v in d.items() if v is not None}
 
+    
+    def save_dynamic_thresholds(self, model_id: str, thresholds: dict) -> str:
+        """
+        Persist a new version of dynamic thresholds.
+        """
+        threshold_id = str(uuid.uuid4())
+        now = self._now_iso()
+
+        metadata = self._flatten_meta(
+            {
+                "threshold_id": threshold_id,
+                "model_id": model_id,
+                "type": "threshold_config",
+                "thresholds": json.dumps(thresholds),
+                "updated_at": now,
+            }
+        )
+
+        doc = f"Threshold config for model {model_id} updated at {now}"
+
+        self._metrics.add(
+            ids=[threshold_id],
+            documents=[doc],
+            metadatas=[metadata],
+        )
+
+        logger.info("Saved dynamic thresholds for model=%s", model_id)
+        return threshold_id
     # ------------------------------------------------------------------
     # ── INCIDENTS collection ──────────────────────────────────────────
     # ------------------------------------------------------------------
@@ -502,3 +530,60 @@ class RAGStore:
             f"error rate {metrics.get('error_rate', 'N/A')}, "
             f"predictions {metrics.get('prediction_count', 'N/A')}."
         )
+    
+    def get_dynamic_thresholds(self, model_id: str) -> dict | None:
+        """
+        Retrieve the latest learned thresholds for a model.
+
+        Thresholds are stored in the metrics_history collection with:
+            metadata["type"] = "threshold_config"
+
+        Returns:
+            dict of thresholds OR None if not found
+        """
+        try:
+            results = self._metrics.get(
+                where={
+                    "model_id": model_id,
+                    "type": "threshold_config",
+                },
+                include=["metadatas"],
+                limit=5,  # small window, we'll sort anyway
+            )
+
+            metas = results.get("metadatas") or []
+            if not metas:
+                return None
+
+            # Sort newest first
+            metas_sorted = sorted(
+                metas,
+                key=lambda m: m.get("updated_at", m.get("sampled_at", "")),
+                reverse=True,
+            )
+
+            latest = metas_sorted[0]
+
+            raw = latest.get("thresholds")
+
+            if not raw:
+                logger.warning("Threshold record found but no 'thresholds' field")
+                return None
+
+            # thresholds might be stored as JSON string
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except json.JSONDecodeError:
+                    logger.error("Failed to parse stored thresholds JSON")
+                    return None
+
+            if not isinstance(raw, dict):
+                logger.error("Invalid thresholds format (not dict)")
+                return None
+
+            return raw
+
+        except Exception as e:
+            logger.error("Error retrieving dynamic thresholds: %s", e)
+            return None

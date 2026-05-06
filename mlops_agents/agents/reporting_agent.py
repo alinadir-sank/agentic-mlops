@@ -155,6 +155,144 @@ def _llm_executive_summary(state: AgentState, report: str) -> str:
             f"Action `{state.get('remediation_action', 'N/A')}` completed with "
             f"status: {state.get('remediation_status', 'N/A')}."
         )
+    
+def _compute_drift_trend(trend: list[dict]) -> str:
+    """
+    Simple drift trend detector using last 5 points.
+    """
+    if len(trend) < 3:
+        return "flat"
+
+    recent = trend[:5]
+    drift_vals = [m.get("drift_score", 0.0) for m in recent if m.get("drift_score") is not None]
+
+    if len(drift_vals) < 3:
+        return "flat"
+
+    # crude slope
+    if drift_vals[0] > drift_vals[-1] * 1.1:
+        return "increasing"
+    if drift_vals[0] < drift_vals[-1] * 0.9:
+        return "decreasing"
+
+    return "flat"
+
+
+def _clamp_thresholds(t: dict) -> dict:
+    """Clamp thresholds to safe bounds."""
+    t["accuracy_major"] = max(0.6, min(0.85, t["accuracy_major"]))
+    t["accuracy_critical"] = max(0.5, min(0.75, t["accuracy_critical"]))
+
+    t["drift_major"] = max(0.1, min(0.7, t["drift_major"]))
+    t["drift_critical"] = max(0.3, min(0.9, t["drift_critical"]))
+
+    t["latency_major_ms"] = max(500, min(3000, t["latency_major_ms"]))
+    t["latency_critical_ms"] = max(1000, min(5000, t["latency_critical_ms"]))
+
+    t["error_rate_major"] = max(0.01, min(0.2, t["error_rate_major"]))
+    t["error_rate_critical"] = max(0.05, min(0.3, t["error_rate_critical"]))
+
+    return t
+
+
+def threshold_learning(state: AgentState, rag: RAGStore) -> None:
+    """
+    Outcome-based threshold tuning.
+
+    Uses:
+    - Incident outcome
+    - Historical stats
+    - Trend awareness
+    - Learning rate
+    - Cooldown
+    """
+    metrics: dict = state.get("metrics") or {}
+    model_id: str = metrics.get("model_id", "unknown")
+    environment: str = metrics.get("environment", "production")
+
+    # ── Cooldown ─────────────────────────────────────────────────────
+    existing = rag.get_dynamic_thresholds(model_id=model_id)
+
+    now = datetime.now(timezone.utc)
+    if existing and "updated_at" in existing:
+        last_update = datetime.fromisoformat(existing["updated_at"])
+        if (now - last_update).total_seconds() < 1800:  # 30 minutes
+            logger.info("Threshold learning skipped (cooldown active)")
+            return
+
+    # ── Base thresholds ──────────────────────────────────────────────
+    if existing:
+        thresholds = existing["thresholds"].copy()
+        version = existing.get("version", 1) + 1
+    else:
+        # fallback to defaults via monitor logic
+        thresholds = state.get("thresholds") or {}
+        version = 1
+
+    if not thresholds:
+        logger.warning("No thresholds found — skipping learning")
+        return
+
+    # ── Learning rate ────────────────────────────────────────────────
+    stats = rag.get_incident_stats(model_id=model_id, environment=environment)
+    num_incidents = max(stats.get("total", 1), 1)
+    learning_rate = min(0.1, 1 / num_incidents)
+
+    logger.info("Threshold learning rate: %.4f (incidents=%d)", learning_rate, num_incidents)
+
+    severity = state.get("severity", "none")
+    remediation_status = state.get("remediation_status", "")
+    human_approved = state.get("human_approved", False)
+
+    # ── Outcome-based adjustment ─────────────────────────────────────
+
+    # Case 1: false positive → too sensitive
+    if severity in ("major", "critical") and (
+        remediation_status == "skipped" or not human_approved
+    ):
+        logger.info("Detected false positive → relaxing thresholds")
+        thresholds["accuracy_major"] += 0.01 * learning_rate
+        thresholds["drift_major"] += 0.02 * learning_rate
+
+    # Case 2: successful remediation → reinforce
+    elif remediation_status == "success":
+        logger.info("Successful remediation → reinforcing sensitivity")
+        thresholds["accuracy_major"] -= 0.005 * learning_rate
+        thresholds["drift_major"] -= 0.01 * learning_rate
+
+    # Case 3: missed detection (minor but bad metrics)
+    elif severity in ("none", "minor"):
+        acc = metrics.get("accuracy", 1.0)
+        drift = metrics.get("drift_score", 0.0)
+
+        if acc < thresholds["accuracy_major"] or drift > thresholds["drift_major"]:
+            logger.info("Missed detection → tightening thresholds")
+            thresholds["accuracy_major"] -= 0.01 * learning_rate
+            thresholds["drift_major"] -= 0.02 * learning_rate
+
+    # ── Trend awareness ──────────────────────────────────────────────
+    trend = rag.query_recent_metrics(model_id=model_id, environment=environment)
+    drift_trend = _compute_drift_trend(trend)
+
+    if drift_trend == "increasing":
+        logger.info("Drift trend increasing → preemptively tightening drift threshold")
+        thresholds["drift_major"] -= 0.02 * learning_rate
+
+    # ── Clamp ────────────────────────────────────────────────────────
+    thresholds = _clamp_thresholds(thresholds)
+
+    # ── Save ─────────────────────────────────────────────────────────
+    payload = {
+        "model_id": model_id,
+        "environment": environment,
+        "version": version,
+        "updated_at": now.isoformat(),
+        "thresholds": thresholds,
+    }
+
+    rag.save_dynamic_thresholds(model_id=model_id, thresholds=payload)
+
+    logger.info("Updated dynamic thresholds v%s: %s", version, thresholds)
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +375,12 @@ def reporting_agent(state: AgentState, rag: RAGStore) -> AgentState:
         "Reporting complete. incident_id=%s notifications=%s",
         incident_id, notifications,
     )
+
+    # ── 6. Threshold learning ───────────────────────────────────────────
+    try:
+        threshold_learning(state, rag)
+    except Exception as e:
+        logger.error("Threshold learning failed: %s", e)
 
     return {
         **state,
