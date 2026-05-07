@@ -6,6 +6,8 @@ from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage
 from state import AgentState
 from mlops_agents.rag.store import RAGStore
+from pydantic import BaseModel, Field, field_validator
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +21,31 @@ THRESHOLD_LIMITS = {
     "error_rate_major": (0.01, 0.2),
     "error_rate_critical": (0.05, 0.3),
 }
+
+class MetricDeltas(BaseModel):
+    # Every valid threshold key is explicitly mapped as an optional float defaulting to 0.0
+    accuracy_major: Optional[float] = Field(default=0.0, description="Delta adjustment for major accuracy")
+    accuracy_critical: Optional[float] = Field(default=0.0, description="Delta adjustment for critical accuracy")
+    drift_major: Optional[float] = Field(default=0.0, description="Delta adjustment for major drift")
+    drift_critical: Optional[float] = Field(default=0.0, description="Delta adjustment for critical drift")
+    latency_major_ms: Optional[float] = Field(default=0.0, description="Delta adjustment for major latency ms")
+    latency_critical_ms: Optional[float] = Field(default=0.0, description="Delta adjustment for critical latency ms")
+    error_rate_major: Optional[float] = Field(default=0.0, description="Delta adjustment for major error rate")
+    error_rate_critical: Optional[float] = Field(default=0.0, description="Delta adjustment for critical error rate")
+
+    @field_validator('*')
+    @classmethod
+    def validate_deltas(cls, v: Optional[float]) -> Optional[float]:
+        """Enforces the maximum delta ceiling at the parser layer."""
+        if v is not None and (v < -0.02 or v > 0.02):
+            raise ValueError("Delta adjustment must be strictly between -0.02 and 0.02")
+        return v
+
+class ThresholdAdjustment(BaseModel):
+    should_update: bool = Field(description="Whether thresholds should be updated")
+    confidence: float = Field(description="Confidence score for the recommendation from 0.0 to 1.0")
+    reasoning: str = Field(description="Detailed text explaining the decision context")
+    adjustments: MetricDeltas = Field(description="Key-value pairs of metric names and their delta adjustments")
 
 MAX_THRESHOLD_DELTA = 0.02
 
@@ -36,28 +63,72 @@ def _compute_drift_trend(trend: list[dict]) -> str:
     if vals[0] < vals[-1] * 0.9: return "decreasing"
     return "flat"
 
-def _llm_threshold_advisor(state: AgentState, thresholds: dict, historical_stats: dict, trend: list[dict]) -> dict:
+def _llm_threshold_advisor(
+    state: AgentState,
+    thresholds: dict,
+    historical_stats: dict,
+    trend: list[dict],
+) -> dict:
+    """Restored full LLM prompt with trend context using strict Ollama JSON schema."""
     model_name = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
-    llm = ChatOllama(model=model_name, temperature=0)
-    
+    ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
+    # 2. Initialize the model and bind the structured output schema
+    llm = ChatOllama(
+        model=model_name,
+        base_url=ollama_url,
+        temperature=0,
+    ).with_structured_output(ThresholdAdjustment)
+
+    metrics = state.get("metrics") or {}
+
+    # Prompt text remains clean since formatting rules are handled at the schema level
     prompt = f"""
-    Recommend SMALL monitoring threshold adjustments (+/-0.02 max). 
-    Current: {json.dumps(thresholds)}
-    Incident: {state.get('diagnosis')}
-    History: {json.dumps(historical_stats)}
-    Return ONLY JSON with keys: should_update, confidence, reasoning, adjustments.
-    """
+You are an adaptive ML reliability agent.
+
+Your task:
+Recommend SMALL monitoring threshold adjustments.
+
+Goals:
+- reduce false positives
+- detect degradation earlier
+- avoid unnecessary retraining
+
+Rules:
+- only propose small deltas
+- max delta per threshold is +/-0.02
+
+Current thresholds:
+{json.dumps(thresholds, indent=2)}
+
+Current incident:
+{json.dumps({
+    "severity": state.get("severity"),
+    "metrics": metrics,
+    "diagnosis": state.get("diagnosis"),
+    "remediation_status": state.get("remediation_status"),
+    "human_approved": state.get("human_approved"),
+}, indent=2)}
+
+Historical stats:
+{json.dumps(historical_stats, indent=2)}
+
+Recent trend:
+{json.dumps(trend[:5], indent=2)}
+"""
     try:
+        # 3. Invoke the structured model; it directly returns a Pydantic object
         response = llm.invoke([
             SystemMessage(content="You are an adaptive threshold tuning agent."),
             HumanMessage(content=prompt),
         ])
-        raw = response.content.strip()
-        if "```" in raw: raw = raw.split("```")[1].replace("json", "", 1).strip()
-        return json.loads(raw)
+        
+        # Convert the parsed model back into a standard dictionary
+        return response.model_dump()
+        
     except Exception as exc:
-        logger.error(f"LLM Advisor failed: {exc}")
-        return {"should_update": False, "adjustments": {}}
+        logger.error("Threshold advisor failed: %s", exc)
+        return {"should_update": False, "confidence": 0.0, "reasoning": str(exc), "adjustments": {}}
 
 def run_threshold_update(state: AgentState, rag: RAGStore) -> None:
     """Main entry point for the threshold learning subsystem."""
@@ -79,19 +150,22 @@ def run_threshold_update(state: AgentState, rag: RAGStore) -> None:
     
     # Logic: Learning Rate & Advisor
     lr = min(0.1, 1 / max(hist_stats.get("total", 1), 1))
+
+    # The proposal is guaranteed to only contain valid keys and legal bounds
     proposal = _llm_threshold_advisor(state, thresholds, hist_stats, trend)
 
     if not proposal.get("should_update"): return
 
-    # Apply Adjustments
     conf = max(0.0, min(1.0, float(proposal.get("confidence", 0.0))))
     applied = {}
-    for key, delta in proposal.get("adjustments", {}).items():
-        if key in thresholds:
-            eff_delta = float(delta) * conf * lr
-            thresholds[key] += max(-MAX_THRESHOLD_DELTA, min(MAX_THRESHOLD_DELTA, eff_delta))
+    # Access fields directly and safely using model_dump()
+    adjustments_dict = proposal.get("adjustments", {})
+    for key, delta in adjustments_dict.items():
+        if delta != 0.0 and key in thresholds:  # Only process intentional changes
+            eff_delta = delta * conf * lr
+            thresholds[key] += eff_delta
             applied[key] = eff_delta
-
+    
     # Trend awareness override
     if _compute_drift_trend(trend) == "increasing":
         thresholds["drift_major"] -= 0.01 * lr
