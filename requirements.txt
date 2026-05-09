@@ -30,3 +30,6 @@ sendgrid>=6.11.0
 # for testing pipeline
 scikit-learn
 pandas
+
+# for streamlit dashboards
+streamlit
