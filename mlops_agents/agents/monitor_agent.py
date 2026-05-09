@@ -26,6 +26,10 @@ from tools.metrics_source import fetch_model_metrics, MetricsSourceError
 
 logger = logging.getLogger(__name__)
 
+from dotenv import load_dotenv
+
+load_dotenv()  # Load environment variables from .env file if present
+
 
 # ---------------------------------------------------------------------------
 # Pydantic schemas for structured LLM outputs

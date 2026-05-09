@@ -20,6 +20,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 # ---------------------------------------------------------------------------
 # Exceptions

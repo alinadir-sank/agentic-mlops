@@ -31,6 +31,9 @@ from agents.diagnosis_agent import diagnosis_agent
 from agents.remediation_agent import remediation_agent
 from agents.reporting_agent import reporting_agent
 
+from dotenv import load_dotenv
+load_dotenv()
+
 logger = logging.getLogger(__name__)
 
 

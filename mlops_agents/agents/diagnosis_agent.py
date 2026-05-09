@@ -25,6 +25,10 @@ from pydantic import BaseModel, Field, field_validator, model_validator, Validat
 from state import AgentState
 from mlops_agents.rag.store import RAGStore
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------

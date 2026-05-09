@@ -25,6 +25,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("rag.init_collections")
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 # ---------------------------------------------------------------------------
 # Collection definitions

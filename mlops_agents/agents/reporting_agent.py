@@ -23,6 +23,11 @@ from agents.threshold_manager import run_threshold_update
 
 logger = logging.getLogger(__name__)
 
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
 
 # ---------------------------------------------------------------------------
 # Threshold learning config

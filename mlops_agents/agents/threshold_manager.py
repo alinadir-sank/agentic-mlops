@@ -9,6 +9,9 @@ from mlops_agents.rag.store import RAGStore
 from pydantic import BaseModel, Field, field_validator, ValidationError
 from typing import Optional
 from langchain_core.runnables import RunnableRetry
+from dotenv import load_dotenv
+
+load_dotenv()  # Load environment variables from .env file if present
 
 logger = logging.getLogger(__name__)
 

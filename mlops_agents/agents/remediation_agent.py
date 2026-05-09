@@ -22,6 +22,10 @@ from tools.mcp_tools import (
     open_github_issue,
 )
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 logger = logging.getLogger(__name__)
 
 def remediation_agent(state: AgentState) -> AgentState:
