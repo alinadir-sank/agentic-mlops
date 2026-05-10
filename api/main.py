@@ -122,6 +122,27 @@ async def _execute_pipeline(thread_id: str, model_id: str, environment: str):
                 runs[thread_id]["incident_id"] = node_out["incident_id"]
             if "report" in node_out:
                 runs[thread_id]["report"] = node_out["report"]
+            if "remediation_action" in node_out:
+                runs[thread_id]["remediation_action"] = node_out["remediation_action"]
+            if "remediation_detail" in node_out:
+                runs[thread_id]["remediation_detail"] = node_out["remediation_detail"]
+            if "diagnosis_json" in node_out:
+                runs[thread_id]["diagnosis_json"] = node_out["diagnosis_json"]
+            if "retrain_prescription" in node_out:
+                runs[thread_id]["retrain_prescription"] = node_out["retrain_prescription"]
+            if "drifted_features" in node_out:
+                runs[thread_id]["drifted_features"] = node_out["drifted_features"]
+            if "similar_incidents" in node_out:
+                runs[thread_id]["similar_incidents"] = node_out["similar_incidents"]
+            if "relevant_runbooks" in node_out:
+                runs[thread_id]["relevant_runbooks"] = node_out["relevant_runbooks"]
+            if "notifications_sent" in node_out:
+                runs[thread_id]["notifications_sent"] = node_out["notifications_sent"]
+            if "messages" in node_out:
+                runs[thread_id]["messages"] = [
+                    m.content if hasattr(m, "content") else str(m)
+                    for m in node_out["messages"]
+                ]
 
         runs[thread_id]["status"]       = "completed"
         runs[thread_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
@@ -158,6 +179,27 @@ async def _resume_pipeline(thread_id: str, approved: bool):
                 runs[thread_id]["incident_id"] = node_out["incident_id"]
             if "report" in node_out:
                 runs[thread_id]["report"] = node_out["report"]
+            if "remediation_action" in node_out:
+                runs[thread_id]["remediation_action"] = node_out["remediation_action"]
+            if "remediation_detail" in node_out:
+                runs[thread_id]["remediation_detail"] = node_out["remediation_detail"]
+            if "diagnosis_json" in node_out:
+                runs[thread_id]["diagnosis_json"] = node_out["diagnosis_json"]
+            if "retrain_prescription" in node_out:
+                runs[thread_id]["retrain_prescription"] = node_out["retrain_prescription"]
+            if "drifted_features" in node_out:
+                runs[thread_id]["drifted_features"] = node_out["drifted_features"]
+            if "similar_incidents" in node_out:
+                runs[thread_id]["similar_incidents"] = node_out["similar_incidents"]
+            if "relevant_runbooks" in node_out:
+                runs[thread_id]["relevant_runbooks"] = node_out["relevant_runbooks"]
+            if "notifications_sent" in node_out:
+                runs[thread_id]["notifications_sent"] = node_out["notifications_sent"]
+            if "messages" in node_out:
+                runs[thread_id]["messages"] = [
+                    m.content if hasattr(m, "content") else str(m)
+                    for m in node_out["messages"]
+                ]
 
         runs[thread_id]["status"]       = "completed"
         runs[thread_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
@@ -192,6 +234,15 @@ async def trigger_run(req: RunRequest, background_tasks: BackgroundTasks):
         "created_at":          datetime.now(timezone.utc).isoformat(),
         "started_at":          None,
         "completed_at":        None,
+        "remediation_action":   None,
+        "remediation_detail":   None,
+        "diagnosis_json":       None,
+        "retrain_prescription": None,
+        "drifted_features":     [],
+        "similar_incidents":    [],
+        "relevant_runbooks":    [],
+        "notifications_sent":   [],
+        "messages":             [],
     }
 
     background_tasks.add_task(
