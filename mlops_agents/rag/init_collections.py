@@ -205,6 +205,7 @@ def seed_runbooks() -> None:
     RUNBOOKS = [
 
         {
+            "doc_id": 1,
             "title":    "Concept Drift — Fraud Pattern Shift Runbook",
             "doc_type": "runbook",
             "tags":     "concept_drift,recall,retrain,fraud,drift_period_only",
@@ -259,6 +260,7 @@ The model is confidently wrong — not uncertain.
         },
 
         {
+            "doc_id": 2,
             "title":    "Data Drift — Covariate Shift Runbook",
             "doc_type": "runbook",
             "tags":     "data_drift,covariate_shift,retrain,recent_window,psi",
@@ -311,6 +313,7 @@ Action: investigate rather than retrain again.
         },
 
         {
+            "doc_id": 3,
             "title":    "Latency Spike — Infrastructure Runbook",
             "doc_type": "runbook",
             "tags":     "latency,infrastructure,scale,kubernetes,not_retrain",
@@ -362,6 +365,7 @@ kubectl describe pod <pod-name> -n ml-production
         },
 
         {
+            "doc_id": 4,
             "title":    "High Error Rate — Model Serving Failure Runbook",
             "doc_type": "runbook",
             "tags":     "error_rate,serving,schema,investigate,malformed",
@@ -406,6 +410,7 @@ Distinct from accuracy degradation which is wrong predictions not failed ones.
         },
 
         {
+            "doc_id": 5,
             "title":    "Post-Retrain Regression — Rollback Runbook",
             "doc_type": "runbook",
             "tags":     "rollback,regression,retrain,deployment,helm",
@@ -452,6 +457,7 @@ Distinct from gradual drift — regression is sudden and correlates with deploym
         },
 
         {
+            "doc_id": 6,
             "title":    "Gradual Accuracy Decay — Model Staleness Runbook",
             "doc_type": "runbook",
             "tags":     "staleness,accuracy,gradual,retrain,full_history,weighted_recent",
@@ -500,6 +506,7 @@ Reactive retraining for staleness always results in some period of degraded perf
         },
 
         {
+            "doc_id": 7,
             "title":    "Mixed Drift — Simultaneous Data and Concept Drift Runbook",
             "doc_type": "runbook",
             "tags":     "mixed_drift,concept_drift,data_drift,critical,drift_period_only",
@@ -556,6 +563,7 @@ Typically occurs during major platform changes or large-scale fraud pattern shif
         },
 
         {
+            "doc_id": 8,
             "title":    "2024-Q3 Production Post-Mortem — Amount Feature Drift",
             "doc_type": "post_mortem",
             "tags":     "post_mortem,data_drift,amount,merchant,retrain,2024",
@@ -655,5 +663,5 @@ if __name__ == "__main__":
 
     init_collections(reset=args.reset)
     seed_runbooks()
-    
+
     print("\n✅  ChromaDB collections ready.")
