@@ -437,7 +437,13 @@ async def health():
 # ── entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    
+    from mlops_agents.rag.init_collections import init
     import uvicorn
+    
+    # run initialization script for RAG
+    init()
+    
     uvicorn.run(
         "api.main:app",
         host="0.0.0.0",

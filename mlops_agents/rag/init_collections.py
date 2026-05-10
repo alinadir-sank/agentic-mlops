@@ -635,6 +635,13 @@ Recall dropped because the fraud boundary shifted with the Amount distribution.
     print("  python scripts/inject_metrics.py --list")
     print("  Or use the Runbooks page → Test Query tab in the dashboard.")
 
+def init() -> None:
+    print("Running initialization script for RAG system")
+    print("Initializing collections")
+    init_collections()
+    print("Seeding starter runbooks")
+    seed_runbooks()
+    print("Initialization script now complete")
 
 # ---------------------------------------------------------------------------
 # CLI entry-point
