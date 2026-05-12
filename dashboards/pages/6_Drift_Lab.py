@@ -81,7 +81,7 @@ def api_post(tool, params=None):
     r = requests.post(
         f"{MODEL_SERVER}/mcp/call",
         json={"tool": tool, "params": params or {}},
-        timeout=5,
+        timeout=60,
     )
     r.raise_for_status()
     return r.json()

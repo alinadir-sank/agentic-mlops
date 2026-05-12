@@ -44,6 +44,10 @@ def get_rag():
     from mlops_agents.rag.store import RAGStore
     return RAGStore()
 
+def _rgb(h):
+    h = h.lstrip("#")
+    return f"{int(h[0:2],16)},{int(h[2:4],16)},{int(h[4:6],16)}"
+
 # ── page header ───────────────────────────────────────────────────────────────
 st.markdown("""
 <div style="padding:24px 0 8px 0;">
@@ -133,10 +137,6 @@ with tab1:
 
     except Exception as e:
         st.error(f"Could not connect to ChromaDB: {e}")
-
-def _rgb(h):
-    h = h.lstrip("#")
-    return f"{int(h[0:2],16)},{int(h[2:4],16)},{int(h[4:6],16)}"
 
 # ── tab 2: ingest ─────────────────────────────────────────────────────────────
 with tab2:

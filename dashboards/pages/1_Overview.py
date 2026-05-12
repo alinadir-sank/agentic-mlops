@@ -130,7 +130,7 @@ try:
     m = requests.post(
         f"{MODEL_SERVER}/mcp/call",
         json={"tool": "get_current_metrics", "params": {}},
-        timeout=6,
+        timeout=60,
     ).json()
     mc1, mc2, mc3, mc4, mc5, mc6 = st.columns(6)
     mc1.metric("Accuracy",    f"{m.get('accuracy',0):.3f}",    delta=None)
