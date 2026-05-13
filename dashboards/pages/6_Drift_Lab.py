@@ -1,13 +1,11 @@
 """
 dashboard/pages/6_Drift_Lab.py
 
-Drift Lab — fixes all four problems:
-  1. Transaction generator control panel — start/stop subprocess inside the page
-  2. Single drift state — only inject_drift, no simulate_drift confusion
-  3. Explicit stale metrics warning when sample_size < 10
-  4. Actual agent output shown — not hardcoded expected behaviour strings
+Drift Lab — subprocess tracking via PID (psutil) instead of Popen object,
+which is not picklable and silently dies across Streamlit reruns.
 """
 
+import os
 import subprocess
 import sys
 import time
@@ -18,10 +16,13 @@ import pandas as pd
 import requests
 import streamlit as st
 
-import os
+try:
+    import psutil
+    PSUTIL_OK = True
+except ImportError:
+    PSUTIL_OK = False
 
-st.set_page_config(page_title="Drift Lab · MLOps",
-                   page_icon="⬡", layout="wide")
+st.set_page_config(page_title="Drift Lab · MLOps", page_icon="⬡", layout="wide")
 
 st.markdown("""
 <style>
@@ -47,24 +48,20 @@ html,body,[data-testid="stAppViewContainer"]{background-color:var(--bg)!importan
 </style>
 """, unsafe_allow_html=True)
 
-API = st.session_state.get("api_url",   "http://localhost:8000")
-MODEL_SERVER = st.session_state.get("model_url", "http://localhost:8080")
-FEATURE_NAMES = [f"V{i}" for i in range(
-    1, 29)] + ["Amount_scaled", "Time_scaled"]
+API           = st.session_state.get("api_url",   "http://localhost:8000")
+MODEL_SERVER  = st.session_state.get("model_url", "http://localhost:8080")
+FEATURE_NAMES = [f"V{i}" for i in range(1, 29)] + ["Amount_scaled", "Time_scaled"]
 
 # ── session state ─────────────────────────────────────────────────────────────
 for k, v in [
-    ("gen_proc",          None),
-    ("gen_running",       False),
+    ("gen_pid",            None),   # ← PID (int), not Popen — survives reruns
     ("drift_features_sel", ["Amount_scaled", "V14", "V17"]),
-    ("drift_mag_sel",     2.5),
+    ("drift_mag_sel",      2.5),
 ]:
     if k not in st.session_state:
         st.session_state[k] = v
 
 # ── helpers ───────────────────────────────────────────────────────────────────
-
-
 def section(title, sub=""):
     st.markdown(
         f"""<div style="margin:24px 0 14px;padding-bottom:10px;border-bottom:1px solid #1f2330;">
@@ -75,15 +72,38 @@ def section(title, sub=""):
     )
 
 
-def check_gen():
-    proc = st.session_state["gen_proc"]
-    if proc is None:
+def is_pid_alive(pid: int | None) -> bool:
+    """Check whether a PID is alive. Works without psutil as a fallback."""
+    if pid is None:
         return False
-    if proc.poll() is not None:
-        st.session_state["gen_running"] = False
-        st.session_state["gen_proc"] = None
-        return False
-    return True
+    if PSUTIL_OK:
+        try:
+            p = psutil.Process(pid)
+            return p.is_running() and p.status() != psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            return False
+    else:
+        # POSIX fallback: os.kill(pid, 0) raises if process is gone
+        try:
+            os.kill(pid, 0)
+            return True
+        except (ProcessLookupError, PermissionError):
+            return False
+
+
+def kill_pid(pid: int | None) -> None:
+    if pid is None:
+        return
+    if PSUTIL_OK:
+        try:
+            psutil.Process(pid).terminate()
+        except psutil.NoSuchProcess:
+            pass
+    else:
+        try:
+            os.kill(pid, 15)  # SIGTERM
+        except ProcessLookupError:
+            pass
 
 
 def api_post(tool, params=None):
@@ -99,17 +119,14 @@ def api_post(tool, params=None):
 def fetch_last_run():
     try:
         runs = requests.get(f"{API}/runs", timeout=4).json()
-        done = [r for r in runs if r.get("status") in (
-            "completed", "failed", "rejected")]
+        done = [r for r in runs if r.get("status") in ("completed", "failed", "rejected")]
         return done[0] if done else None
     except Exception:
         return None
 
 
-SEV_COLOR = {"none": "#00e5a0", "minor": "#00d4ff",
-             "major": "#ffb800", "critical": "#ff4560"}
-TAG_COLOR = {"Monitor": "#00d4ff", "Diagnosis": "#9b59ff",
-             "Remediation": "#ffb800", "Reporting": "#00e5a0"}
+SEV_COLOR = {"none": "#00e5a0", "minor": "#00d4ff", "major": "#ffb800", "critical": "#ff4560"}
+TAG_COLOR = {"Monitor": "#00d4ff", "Diagnosis": "#9b59ff", "Remediation": "#ffb800", "Reporting": "#00e5a0"}
 
 # ── PAGE HEADER ───────────────────────────────────────────────────────────────
 st.markdown("""
@@ -121,13 +138,20 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+if not PSUTIL_OK:
+    st.warning("`psutil` not installed — run `pip install psutil`. Falling back to os.kill() liveness check.")
+
 # ═════════════════════════════════════════════════════════════════════════════
 # SECTION 1 — TRANSACTION GENERATOR
 # ═════════════════════════════════════════════════════════════════════════════
 section("Transaction Generator",
         "required — drift has no observable effect without predictions flowing")
 
-gen_alive = check_gen()
+# Derive liveness from PID every rerun — no stale Popen reference
+gen_alive = is_pid_alive(st.session_state["gen_pid"])
+if not gen_alive and st.session_state["gen_pid"] is not None:
+    # Process died on its own — clean up
+    st.session_state["gen_pid"] = None
 
 if not gen_alive:
     st.markdown("""
@@ -138,35 +162,33 @@ if not gen_alive:
         Start the generator before injecting drift.
     </div>""", unsafe_allow_html=True)
 else:
-    st.markdown("""
+    st.markdown(f"""
     <div style="padding:10px 16px;background:rgba(0,229,160,0.08);border:1px solid rgba(0,229,160,0.3);
                 border-radius:6px;font-family:'JetBrains Mono',monospace;font-size:0.78rem;color:#00e5a0;
                 margin-bottom:12px;">
-        ● Running — Kaggle rows flowing to /predict
+        ● Running — Kaggle rows flowing to /predict &nbsp;·&nbsp;
+        <span style="color:#555c72;">pid {st.session_state['gen_pid']}</span>
     </div>""", unsafe_allow_html=True)
 
 g1, g2, g3, g4 = st.columns(4)
 with g1:
-    rate = st.selectbox(
-        "Rate (req/s)", [1, 2, 5, 10, 20], index=1, key="gen_rate")
+    rate = st.selectbox("Rate (req/s)", [1, 2, 5, 10, 20], index=1, key="gen_rate")
 with g2:
-    err_sel = st.selectbox(
-        "Error inject", ["0% (none)", "5%", "10%", "20%"], index=0, key="gen_err")
+    err_sel  = st.selectbox("Error inject", ["0% (none)", "5%", "10%", "20%"], index=0, key="gen_err")
     err_frac = float(err_sel.replace("%", "").split()[0]) / 100
 with g3:
-    seed_n = st.selectbox(
-        "Pool size", [100, 200, 500, 1000], index=2, key="gen_seed")
+    seed_n = st.selectbox("Pool size", [100, 200, 500, 1000], index=2, key="gen_seed")
 with g4:
     st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+
     if not gen_alive:
         if st.button("▶  Start Generator", type="primary", use_container_width=True):
-            script_path = Path(__file__).parent.parent.parent / \
-                "mlops_agents" / "scripts" / "transaction_generator.py"
+            script_path  = Path(__file__).parent.parent.parent / "mlops_agents" / "scripts" / "transaction_generator.py"
+            project_root = Path(__file__).parent.parent.parent
+
             if not script_path.exists():
-                st.error(f"Generator script not found: {script_path}")
+                st.error(f"Script not found: {script_path}")
             else:
-                # adjust to repo root
-                project_root = Path(__file__).parent.parent.parent
                 cmd = [
                     sys.executable, str(script_path),
                     "--rate",       str(rate),
@@ -177,39 +199,34 @@ with g4:
                 try:
                     proc = subprocess.Popen(
                         cmd,
-                        cwd=str(script_path.parent),
+                        cwd=str(project_root),          # repo root so relative imports work
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.PIPE,
                         text=True,
                         env={**os.environ, "PYTHONPATH": str(project_root)},
                     )
-                    time.sleep(1)
+                    time.sleep(1.5)                     # give it a moment to either boot or crash
+
                     if proc.poll() is not None:
-                        err = proc.stderr.read().strip() if proc.stderr else ""
-                        st.error(f"Generator exited: {proc.returncode}. {err}")
+                        # Crashed at startup — read stderr now while the pipe is still open
+                        err = proc.stderr.read().strip() if proc.stderr else "(no stderr)"
+                        st.error(f"Generator exited immediately (rc={proc.returncode}):\n\n```\n{err}\n```")
                     else:
-                        st.session_state["gen_proc"] = proc
-                        st.session_state["gen_running"] = True
-                        st.success(f"Started — {rate} req/s")
+                        # Store only the PID — an int is always picklable
+                        st.session_state["gen_pid"] = proc.pid
+                        st.success(f"Started — {rate} req/s  ·  pid {proc.pid}")
                         st.rerun()
+
                 except Exception as e:
                     st.error(f"Failed to start: {e}")
     else:
         if st.button("■  Stop Generator", use_container_width=True):
-            proc = st.session_state["gen_proc"]
-            if proc:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=3)
-                except Exception:
-                    pass
-            st.session_state["gen_proc"] = None
-            st.session_state["gen_running"] = False
+            kill_pid(st.session_state["gen_pid"])
+            st.session_state["gen_pid"] = None
             st.warning("Stopped")
             st.rerun()
 
-st.caption(
-    "Runs `scripts/transaction_generator.py` as a subprocess. Needs `./data/creditcard.csv`.")
+st.caption("Runs `scripts/transaction_generator.py` as a subprocess. Needs `./data/creditcard.csv`.")
 
 st.divider()
 
@@ -218,11 +235,10 @@ st.divider()
 # ═════════════════════════════════════════════════════════════════════════════
 section("Drift Injection")
 
-# current state
 try:
-    ds = api_post("get_drift_status")
+    ds     = api_post("get_drift_status")
     active = ds.get("active", False)
-    dtype = ds.get("drift_type", "none")
+    dtype  = ds.get("drift_type", "none")
 except Exception:
     ds, active, dtype = {}, False, "none"
 
@@ -232,12 +248,12 @@ if active:
                 border:1px solid rgba(255,184,0,0.4);border-radius:6px;
                 font-family:'JetBrains Mono',monospace;font-size:0.78rem;color:#ffb800;
                 display:flex;justify-content:space-between;">
-        <span>⚠ ACTIVE: <strong>{dtype.replace('_', ' ').upper()}</strong>
-              {"  ·  "+ds.get('description', '') if ds.get('description') else ""}</span>
+        <span>⚠ ACTIVE: <strong>{dtype.replace('_',' ').upper()}</strong>
+              {"  ·  "+ds.get('description','') if ds.get('description') else ""}</span>
         <span style="color:#555c72;font-size:0.7rem;">
-            {str(ds.get('features', [])) if ds.get('features') else ""}
-            {" swap:"+str(ds.get('swap_features', [])) if ds.get('swap_features') else ""}
-            {" mag:"+str(ds.get('magnitude', 0)) if ds.get('magnitude') else ""}
+            {str(ds.get('features',[])) if ds.get('features') else ""}
+            {" swap:"+str(ds.get('swap_features',[])) if ds.get('swap_features') else ""}
+            {" mag:"+str(ds.get('magnitude',0)) if ds.get('magnitude') else ""}
         </span>
     </div>""", unsafe_allow_html=True)
 else:
@@ -274,19 +290,19 @@ if drift_type_sel in ("data_drift", "mixed"):
                         label_visibility="collapsed")
         st.session_state["drift_mag_sel"] = mag
         st.caption(f"mag: {mag}")
-    config["features"] = sel_feats
+    config["features"]  = sel_feats
     config["magnitude"] = mag
 
     pc1, pc2, pc3 = st.columns(3)
     for col, (lbl, feats, m) in zip([pc1, pc2, pc3], [
-        ("High-value shift",      ["Amount_scaled"],         3.0),
-        ("Geographic shift",      ["V14", "V17", "V12"],       2.0),
-        ("Schema change",         ["V1", "V2", "V3", "V4"],     1.5),
+        ("High-value shift", ["Amount_scaled"],       3.0),
+        ("Geographic shift", ["V14", "V17", "V12"],   2.0),
+        ("Schema change",    ["V1", "V2", "V3", "V4"], 1.5),
     ]):
         with col:
             if st.button(lbl, key=f"pre_{lbl}", use_container_width=True):
                 st.session_state["drift_features_sel"] = feats
-                st.session_state["drift_mag_sel"] = m
+                st.session_state["drift_mag_sel"]      = m
                 st.rerun()
 
 if drift_type_sel in ("concept_drift", "mixed"):
@@ -322,8 +338,7 @@ with ab1:
             st.error("Start the transaction generator first.")
         else:
             try:
-                r = requests.post(f"{API}/drift/inject",
-                                  json=config, timeout=6)
+                r = requests.post(f"{API}/drift/inject", json=config, timeout=6)
                 r.raise_for_status()
                 st.success(r.json().get("message", "Injected"))
                 time.sleep(0.4)
@@ -342,13 +357,11 @@ with ab2:
 with ab3:
     if st.button("▶  Run Monitor", use_container_width=True):
         if not gen_alive:
-            st.warning(
-                "No predictions flowing — monitor may return severity=none regardless.")
+            st.warning("No predictions flowing — monitor may return severity=none regardless.")
         try:
             r = requests.post(
                 f"{API}/runs",
-                json={"model_id": "fraud-classifier-v1",
-                      "environment": "production"},
+                json={"model_id": "fraud-classifier-v1", "environment": "production"},
                 timeout=6,
             )
             r.raise_for_status()
@@ -361,14 +374,14 @@ with ab3:
 st.divider()
 
 # ═════════════════════════════════════════════════════════════════════════════
-# SECTION 3 — LIVE METRICS with explicit stale warning
+# SECTION 3 — LIVE METRICS
 # ═════════════════════════════════════════════════════════════════════════════
 section("Live Metrics")
 
 try:
-    m = api_post("get_current_metrics")
+    m           = api_post("get_current_metrics")
     sample_size = m.get("sample_size", 0)
-    metrics_ok = True
+    metrics_ok  = True
 except Exception as e:
     st.error(f"Model server unreachable: {e}")
     metrics_ok = False
@@ -399,17 +412,13 @@ if metrics_ok:
     for col, (lbl, val, color, fmt) in zip(
         [mc1, mc2, mc3, mc4],
         [
-            ("Drift Score"+stale,
-             m.get("drift_score", 0),  "#ff4560", "{:.4f}"),
-            ("Accuracy Proxy"+stale,
-             m.get("accuracy", 0),     "#00d4ff", "{:.4f}"),
-            ("Latency p95"+stale,    m.get("latency_ms", 0),
-             "#00e5a0", "{:.1f}ms"),
-            ("Error Rate"+stale,     m.get("error_rate", 0),
-             "#ffb800", "{:.4f}"),
+            ("Drift Score" + stale,    m.get("drift_score", 0),  "#ff4560", "{:.4f}"),
+            ("Accuracy Proxy" + stale, m.get("accuracy", 0),     "#00d4ff", "{:.4f}"),
+            ("Latency p95" + stale,    m.get("latency_ms", 0),   "#00e5a0", "{:.1f}ms"),
+            ("Error Rate" + stale,     m.get("error_rate", 0),   "#ffb800", "{:.4f}"),
         ]
     ):
-        disp = fmt.format(val) if "ms" not in fmt else f"{val:.1f}ms"
+        disp = f"{val:.1f}ms" if "ms" in fmt else fmt.format(val)
         with col:
             st.markdown(
                 f'<div style="background:#111318;border:1px solid {color}33;border-radius:8px;'
@@ -422,9 +431,9 @@ if metrics_ok:
 
     st.markdown(
         f'<div style="margin-top:8px;font-family:\'JetBrains Mono\',monospace;font-size:0.7rem;color:#555c72;">'
-        f'recall: {m.get("recall", 0):.4f} &nbsp;·&nbsp; roc_auc: {m.get("roc_auc", 0):.4f}'
-        f' &nbsp;·&nbsp; fraud_rate: {m.get("fraud_rate", 0):.4f}'
-        f' &nbsp;·&nbsp; drift_type: <span style="color:#ffb800;">{m.get("drift_type", "none")}</span>'
+        f'recall: {m.get("recall",0):.4f} &nbsp;·&nbsp; roc_auc: {m.get("roc_auc",0):.4f}'
+        f' &nbsp;·&nbsp; fraud_rate: {m.get("fraud_rate",0):.4f}'
+        f' &nbsp;·&nbsp; drift_type: <span style="color:#ffb800;">{m.get("drift_type","none")}</span>'
         f' &nbsp;·&nbsp; n={sample_size}</div>',
         unsafe_allow_html=True,
     )
@@ -434,7 +443,7 @@ st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 section("Prediction Confidence Distribution", "from real /predict calls")
 
 try:
-    r2 = api_post("get_prediction_history", {"n": 200})
+    r2    = api_post("get_prediction_history", {"n": 200})
     preds = r2.get("predictions", [])
 except Exception:
     preds = []
@@ -447,11 +456,10 @@ if len(preds) < 5:
         unsafe_allow_html=True,
     )
 else:
-    df_p = pd.DataFrame(preds)
+    df_p  = pd.DataFrame(preds)
     probs = df_p["fraud_prob"].values
     hist, edges = np.histogram(probs, bins=20, range=(0, 1))
-    hdf = pd.DataFrame(
-        {"bin": [f"{e:.2f}" for e in edges[:-1]], "count": hist}).set_index("bin")
+    hdf = pd.DataFrame({"bin": [f"{e:.2f}" for e in edges[:-1]], "count": hist}).set_index("bin")
 
     hc1, hc2 = st.columns([3, 1])
     with hc1:
@@ -459,15 +467,14 @@ else:
         hints = {
             "none":         "Healthy — bimodal: confident fraud + confident legit",
             "data_drift":   "Data drift — uncertainty rises, probabilities cluster near 0.5",
-            "concept_drift": "Concept drift — may look bimodal but recall is collapsing",
+            "concept_drift":"Concept drift — may look bimodal but recall is collapsing",
             "mixed":        "Mixed — watch for distribution shift AND recall collapse simultaneously",
         }
         st.caption(hints.get(dtype if active else "none", ""))
     with hc2:
-        fraud_n = int(df_p["prediction"].sum())
-        avg_conf = float(df_p["fraud_prob"].apply(
-            lambda p: max(p, 1-p)).mean())
-        avg_lat = float(df_p["latency_ms"].mean())
+        fraud_n  = int(df_p["prediction"].sum())
+        avg_conf = float(df_p["fraud_prob"].apply(lambda p: max(p, 1 - p)).mean())
+        avg_lat  = float(df_p["latency_ms"].mean())
         st.markdown(
             f'<div style="background:#111318;border:1px solid #1f2330;border-radius:8px;padding:14px;">'
             f'<div style="font-size:0.62rem;color:#555c72;letter-spacing:0.12em;margin-bottom:10px;">STATS</div>'
@@ -496,17 +503,17 @@ if not run:
         unsafe_allow_html=True,
     )
 else:
-    sev = run.get("severity", "—")
-    action = run.get("recommended_action", "—")
-    status = run.get("status", "—")
+    sev     = run.get("severity", "—")
+    action  = run.get("recommended_action", "—")
+    status  = run.get("status", "—")
     rem_sta = run.get("remediation_status", "—")
-    diag = run.get("diagnosis", "—")
+    diag    = run.get("diagnosis", "—")
     rem_det = run.get("remediation_detail", "—")
-    inc_id = run.get("incident_id", "—") or "—"
+    inc_id  = run.get("incident_id", "—") or "—"
 
-    sev_c = SEV_COLOR.get(sev, "#555c72")
+    sev_c  = SEV_COLOR.get(sev, "#555c72")
     stat_c = "#00e5a0" if status == "completed" else "#ff4560"
-    rem_c = "#00e5a0" if rem_sta == "success" else "#ffb800" if rem_sta else "#555c72"
+    rem_c  = "#00e5a0" if rem_sta == "success" else "#ffb800" if rem_sta else "#555c72"
 
     r1, r2, r3, r4 = st.columns(4)
     for col, (lbl, val, color) in zip([r1, r2, r3, r4], [
@@ -524,7 +531,6 @@ else:
                 unsafe_allow_html=True,
             )
 
-    # diagnosis
     if diag and diag != "—":
         st.markdown(
             f'<div style="margin-top:10px;padding:12px 16px;background:#111318;'
@@ -535,23 +541,22 @@ else:
             unsafe_allow_html=True,
         )
 
-    # evidence + reasoning
-    dj = run.get("diagnosis_json") or {}
-    evidence = dj.get("evidence", [])
-    reasoning = dj.get("reasoning", "")
+    dj         = run.get("diagnosis_json") or {}
+    evidence   = dj.get("evidence", [])
+    reasoning  = dj.get("reasoning", "")
     confidence = dj.get("confidence")
-    root_cat = dj.get("root_cause_category", "")
+    root_cat   = dj.get("root_cause_category", "")
 
     if evidence or reasoning:
         ec1, ec2 = st.columns(2)
         with ec1:
             if evidence:
-                ev_html = "".join(
+                ev_html  = "".join(
                     f'<div style="font-size:0.76rem;color:#8b91a8;padding:3px 0;line-height:1.6;">· {e}</div>'
                     for e in evidence
                 )
                 conf_tag = f"<span style='float:right;color:#9b59ff;'>{confidence}</span>" if confidence else ""
-                cat_tag = f"<span style='color:#00d4ff;margin-left:8px;font-size:0.65rem;'>{root_cat}</span>" if root_cat else ""
+                cat_tag  = f"<span style='color:#00d4ff;margin-left:8px;font-size:0.65rem;'>{root_cat}</span>" if root_cat else ""
                 st.markdown(
                     f'<div style="margin-top:10px;padding:12px 16px;background:#111318;'
                     f'border:1px solid #1f2330;border-radius:6px;">'
@@ -569,20 +574,17 @@ else:
                     unsafe_allow_html=True,
                 )
 
-    # prescription chips
     p = run.get("retrain_prescription")
     if p:
         chips = [
-            ("strategy",       p.get("data_strategy", "—"),          "#00d4ff"),
-            (f"window",
-             f"{p.get('window_days', '—')}d",       "#e8eaf0"),
-            ("optimize",       p.get("optimize_for", "—"),            "#9b59ff"),
-            ("target_recall",  str(p.get("target_recall", "—")),      "#ffb800"),
-            ("deploy",         p.get("deployment_strategy", "—"),     "#00e5a0"),
+            ("strategy",      p.get("data_strategy", "—"),      "#00d4ff"),
+            ("window",        f"{p.get('window_days','—')}d",    "#e8eaf0"),
+            ("optimize",      p.get("optimize_for", "—"),        "#9b59ff"),
+            ("target_recall", str(p.get("target_recall", "—")), "#ffb800"),
+            ("deploy",        p.get("deployment_strategy", "—"), "#00e5a0"),
         ]
         if p.get("drifted_features"):
-            chips.append(("drifted", ", ".join(
-                p["drifted_features"]), "#ff4560"))
+            chips.append(("drifted", ", ".join(p["drifted_features"]), "#ff4560"))
 
         chips_html = "".join(
             f'<span style="background:#1a1d26;color:{c};padding:4px 10px;'
@@ -597,7 +599,6 @@ else:
             unsafe_allow_html=True,
         )
 
-    # remediation detail
     if rem_det and rem_det != "—":
         st.markdown(
             f'<div style="margin-top:10px;padding:12px 16px;background:#111318;'
@@ -607,14 +608,13 @@ else:
             unsafe_allow_html=True,
         )
 
-    # agent trace
     msgs = run.get("messages", []) or []
     if msgs:
         with st.expander("Agent message trace", expanded=False):
             for msg in msgs:
-                tag = msg.split("]")[0].lstrip("[") if "]" in msg else "Agent"
-                content = msg.split("]", 1)[1].strip() if "]" in msg else msg
-                tc = TAG_COLOR.get(tag, "#555c72")
+                tag     = msg.split("]")[0].lstrip("[") if "]" in msg else "Agent"
+                content = msg.split("]", 1)[1].strip()  if "]" in msg else msg
+                tc      = TAG_COLOR.get(tag, "#555c72")
                 st.markdown(
                     f'<div style="display:flex;gap:12px;padding:6px 0;border-bottom:1px solid #13161e;'
                     f'font-family:\'JetBrains Mono\',monospace;font-size:0.73rem;">'
@@ -623,16 +623,15 @@ else:
                     unsafe_allow_html=True,
                 )
 
-    # footer meta
-    similar = run.get("similar_incidents", []) or []
+    similar  = run.get("similar_incidents", []) or []
     runbooks = run.get("relevant_runbooks", []) or []
-    notifs = run.get("notifications_sent", []) or []
+    notifs   = run.get("notifications_sent", []) or []
     st.markdown(
         f'<div style="margin-top:8px;font-family:\'JetBrains Mono\',monospace;font-size:0.7rem;color:#555c72;">'
         f'RAG: {len(similar)} incidents · {len(runbooks)} runbooks'
-        f'{"  ·  top sim: "+str(round(1-similar[0].get("distance", 1), 3)) if similar else ""}'
+        f'{"  ·  top sim: "+str(round(1-similar[0].get("distance",1),3)) if similar else ""}'
         f'{"  ·  notifications: "+str(notifs) if notifs else ""}'
-        f'{"  ·  "+inc_id[:28]+"…" if inc_id and inc_id != "—" else ""}'
+        f'{"  ·  "+inc_id[:28]+"…" if inc_id and inc_id!="—" else ""}'
         f'</div>',
         unsafe_allow_html=True,
     )
