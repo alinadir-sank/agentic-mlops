@@ -8,3 +8,4 @@ venv/**
 local_dev/**
 *.egg-info/**
 rag_data/**
+mlops_agents/data/**
