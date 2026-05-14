@@ -7,9 +7,9 @@ Overview page — model health, trigger run, live pipeline status.
 import time
 import streamlit as st
 import requests
-from dotenv import load_dotenv
+from utils.session import init_session
 
-load_dotenv()
+init_session()
 
 st.set_page_config(page_title="Overview · MLOps", page_icon="⬡", layout="wide")
 

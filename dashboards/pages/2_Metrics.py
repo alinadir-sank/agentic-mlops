@@ -10,6 +10,9 @@ import streamlit as st
 import requests
 import pandas as pd
 import numpy as np
+from utils.session import init_session
+
+init_session()
 
 st.set_page_config(page_title="Metrics · MLOps", page_icon="⬡", layout="wide")
 
@@ -89,7 +92,7 @@ try:
     r = requests.post(
         f"{MODEL_SERVER}/mcp/call",
         json={"tool": "get_current_metrics", "params": {}},
-        timeout=8,
+        timeout=60,
     )
     r.raise_for_status()
     metrics = r.json()

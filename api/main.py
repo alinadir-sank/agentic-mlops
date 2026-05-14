@@ -78,11 +78,13 @@ class RunRequest(BaseModel):
     environment: str = "production"
 
 class DriftInjectRequest(BaseModel):
-    type:          str         = "none"
-    features:      list[str]   = []
-    magnitude:     float       = 1.0
-    swap_features: list[str]   = []
-    description:   str         = ""
+    type: str
+    features: list[str] = []
+    mean_shift: float = 1.5
+    noise_scale: float = 0.3
+    corruption_rate: float = 0.3
+    fraud_features: list[str] = ["V14", "V4", "V11", "V12"]
+    description: str = ""
 
 # ── pipeline execution helpers ────────────────────────────────────────────────
 
@@ -361,11 +363,13 @@ async def inject_drift(req: DriftInjectRequest):
             json={
                 "tool": "inject_drift",
                 "params": {
-                    "type":          req.type,
-                    "features":      req.features,
-                    "magnitude":     req.magnitude,
-                    "swap_features": req.swap_features,
-                    "description":   req.description,
+                    "type":            req.type,
+                    "features":        req.features,
+                    "mean_shift":      req.mean_shift,
+                    "noise_scale":     req.noise_scale,
+                    "corruption_rate": req.corruption_rate,
+                    "fraud_features":  req.fraud_features,
+                    "description":     req.description,
                 },
             },
             timeout=10,

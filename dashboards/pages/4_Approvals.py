@@ -8,6 +8,9 @@ Auto-refreshes every 5s when there are pending approvals.
 import time
 import streamlit as st
 import requests
+from utils.session import init_session
+
+init_session()
 
 st.set_page_config(page_title="Approvals · MLOps", page_icon="⬡", layout="wide")
 

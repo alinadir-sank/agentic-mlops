@@ -6,6 +6,9 @@ Incident history — ChromaDB incident feed, severity filter, detail view.
 
 import streamlit as st
 import requests
+from utils.session import init_session
+
+init_session()
 
 st.set_page_config(page_title="Incidents · MLOps", page_icon="⬡", layout="wide")
 

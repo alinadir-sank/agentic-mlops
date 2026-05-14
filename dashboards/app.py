@@ -5,11 +5,10 @@ Run with:
     streamlit run dashboard/app.py --server.port 8501
 """
 
-import os
 import streamlit as st
-from dotenv import load_dotenv
+from utils.session import init_session
 
-load_dotenv()
+init_session()
 
 st.set_page_config(
     page_title="MLOps Agent Dashboard",
@@ -255,9 +254,10 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
+    
+
     api_url = st.text_input(
         "API endpoint",
-        value=os.getenv("MLOPS_API_URL","http://localhost:8000"),
         key="api_url",
         label_visibility="visible",
     )
@@ -266,7 +266,6 @@ with st.sidebar:
 
     model_url = st.text_input(
         "Model server",
-        value=os.getenv("FRAUD_MODEL_MCP_URL","http://localhost:8080"),
         key="model_url",
         label_visibility="visible",
     )

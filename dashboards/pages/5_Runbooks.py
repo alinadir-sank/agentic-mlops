@@ -6,6 +6,9 @@ Runbooks — ingest, browse, delete, and test-query the ChromaDB runbooks collec
 
 import streamlit as st
 import requests
+from utils.session import init_session
+
+init_session()
 
 st.set_page_config(page_title="Runbooks · MLOps", page_icon="⬡", layout="wide")
 

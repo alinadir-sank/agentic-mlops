@@ -15,6 +15,9 @@ import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
+from utils.session import init_session
+
+init_session()
 
 try:
     import psutil
@@ -56,7 +59,10 @@ FEATURE_NAMES = [f"V{i}" for i in range(1, 29)] + ["Amount_scaled", "Time_scaled
 for k, v in [
     ("gen_pid",            None),   # ← PID (int), not Popen — survives reruns
     ("drift_features_sel", ["Amount_scaled", "V14", "V17"]),
-    ("drift_mag_sel",      2.5),
+    ("drift_mean_shift_sel",      1.5),
+    ("drift_noise_scale_sel",     0.3),
+    ("drift_corruption_rate_sel", 0.3),
+    ("drift_fraud_features_sel",  ["V14", "V4", "V11", "V12"]),
 ]:
     if k not in st.session_state:
         st.session_state[k] = v
@@ -274,7 +280,7 @@ drift_type_sel = st.radio(
 config = {"type": drift_type_sel}
 
 if drift_type_sel in ("data_drift", "mixed"):
-    dc1, dc2 = st.columns([3, 1])
+    dc1, dc2, dc3 = st.columns([3, 0.8, 0.8])
     with dc1:
         sel_feats = st.multiselect(
             "Features to bias", FEATURE_NAMES,
@@ -284,45 +290,61 @@ if drift_type_sel in ("data_drift", "mixed"):
         )
         st.session_state["drift_features_sel"] = sel_feats
     with dc2:
-        mag = st.slider("Magnitude", 0.1, 5.0,
-                        value=float(st.session_state["drift_mag_sel"]),
-                        step=0.1, key="drift_mag_widget",
-                        label_visibility="collapsed")
-        st.session_state["drift_mag_sel"] = mag
-        st.caption(f"mag: {mag}")
-    config["features"]  = sel_feats
-    config["magnitude"] = mag
+        mean_shift = st.slider("Mean shift (σ)", 0.1, 5.0,
+                               value=float(st.session_state.get("drift_mean_shift_sel", 1.5)),
+                               step=0.1, key="drift_mean_shift_widget",
+                               label_visibility="collapsed")
+        st.session_state["drift_mean_shift_sel"] = mean_shift
+        st.caption(f"mean_shift: {mean_shift}")
+    with dc3:
+        noise_scale = st.slider("Noise scale", 0.0, 2.0,
+                                value=float(st.session_state.get("drift_noise_scale_sel", 0.3)),
+                                step=0.05, key="drift_noise_scale_widget",
+                                label_visibility="collapsed")
+        st.session_state["drift_noise_scale_sel"] = noise_scale
+        st.caption(f"noise_scale: {noise_scale}")
+    config["features"]    = sel_feats
+    config["mean_shift"]  = mean_shift
+    config["noise_scale"] = noise_scale
 
     pc1, pc2, pc3 = st.columns(3)
-    for col, (lbl, feats, m) in zip([pc1, pc2, pc3], [
-        ("High-value shift", ["Amount_scaled"],       3.0),
-        ("Geographic shift", ["V14", "V17", "V12"],   2.0),
+    for col, (lbl, feats, ms) in zip([pc1, pc2, pc3], [
+        ("High-value shift", ["Amount_scaled"],        3.0),
+        ("Geographic shift", ["V14", "V17", "V12"],    2.0),
         ("Schema change",    ["V1", "V2", "V3", "V4"], 1.5),
     ]):
         with col:
             if st.button(lbl, key=f"pre_{lbl}", use_container_width=True):
-                st.session_state["drift_features_sel"] = feats
-                st.session_state["drift_mag_sel"]      = m
+                st.session_state["drift_features_sel"]   = feats
+                st.session_state["drift_mean_shift_sel"] = ms
                 st.rerun()
 
 if drift_type_sel in ("concept_drift", "mixed"):
     st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
-    cc1, cc2, cc3 = st.columns([2, 0.3, 2])
+    cc1, cc2 = st.columns(2)
     with cc1:
-        fa = st.selectbox("Swap FROM", FEATURE_NAMES,
-                          index=FEATURE_NAMES.index("V14"), key="sw_a")
+        corruption_rate = st.slider(
+            "Corruption rate", 0.0, 1.0,
+            value=float(st.session_state.get("drift_corruption_rate_sel", 0.3)),
+            step=0.05, key="drift_corruption_rate_widget",
+        )
+        st.session_state["drift_corruption_rate_sel"] = corruption_rate
     with cc2:
-        st.markdown("<div style='text-align:center;padding-top:28px;color:#555c72;'>↔</div>",
-                    unsafe_allow_html=True)
-    with cc3:
-        fb = st.selectbox("Swap TO", FEATURE_NAMES,
-                          index=FEATURE_NAMES.index("V4"), key="sw_b")
-    config["swap_features"] = [fa, fb]
+        fraud_features = st.multiselect(
+            "Fraud signal features (inverted during corruption)",
+            FEATURE_NAMES,
+            default=st.session_state.get("drift_fraud_features_sel", ["V14", "V4", "V11", "V12"]),
+            key="drift_fraud_features_widget",
+        )
+        st.session_state["drift_fraud_features_sel"] = fraud_features
+    config["corruption_rate"] = corruption_rate
+    config["fraud_features"]  = fraud_features
     st.markdown(
         f'<div style="margin-top:6px;padding:8px 14px;background:#0d0f14;border:1px solid #1f2330;'
         f'border-radius:4px;font-family:\'JetBrains Mono\',monospace;font-size:0.72rem;color:#8b91a8;">'
-        f'Model learned <span style="color:#ff4560;">{fa}</span> high = fraud. '
-        f'After swap fraud now correlates with <span style="color:#ff4560;">{fb}</span> — recall collapses.</div>',
+        f'~{int(corruption_rate*100)}% of transactions will have fraud-signal features '
+        f'(<span style="color:#ff4560;">{", ".join(fraud_features) if fraud_features else "none"}</span>) '
+        f'inverted — model recall collapses.</div>',
         unsafe_allow_html=True,
     )
 
