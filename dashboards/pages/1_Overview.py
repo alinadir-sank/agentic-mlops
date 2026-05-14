@@ -7,6 +7,9 @@ Overview page — model health, trigger run, live pipeline status.
 import time
 import streamlit as st
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 st.set_page_config(page_title="Overview · MLOps", page_icon="⬡", layout="wide")
 
@@ -31,8 +34,8 @@ html,body,[data-testid="stAppViewContainer"]{background-color:var(--bg)!importan
 </style>
 """, unsafe_allow_html=True)
 
-API = st.session_state.get("api_url", "http://localhost:8000")
-MODEL_SERVER = st.session_state.get("model_url", "http://localhost:8080")
+API = st.session_state.get("api_url")
+MODEL_SERVER = st.session_state.get("model_url")
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 

@@ -34,8 +34,8 @@ html,body,[data-testid="stAppViewContainer"]{background-color:var(--bg)!importan
 </style>
 """, unsafe_allow_html=True)
 
-API          = st.session_state.get("api_url",   "http://localhost:8000")
-MODEL_SERVER = st.session_state.get("model_url", "http://localhost:8080")
+API          = st.session_state.get("api_url")
+MODEL_SERVER = st.session_state.get("model_url")
 
 # ── init metrics history in session state ────────────────────────────────────
 if "metrics_history" not in st.session_state:

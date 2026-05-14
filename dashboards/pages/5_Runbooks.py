@@ -30,7 +30,7 @@ html,body,[data-testid="stAppViewContainer"]{background-color:var(--bg)!importan
 </style>
 """, unsafe_allow_html=True)
 
-API = st.session_state.get("api_url", "http://localhost:8000")
+API = st.session_state.get("api_url")
 
 def section(title, subtitle=""):
     st.markdown(f"""

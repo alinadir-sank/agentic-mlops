@@ -48,8 +48,8 @@ html,body,[data-testid="stAppViewContainer"]{background-color:var(--bg)!importan
 </style>
 """, unsafe_allow_html=True)
 
-API           = st.session_state.get("api_url",   "http://localhost:8000")
-MODEL_SERVER  = st.session_state.get("model_url", "http://localhost:8080")
+API           = st.session_state.get("api_url")
+MODEL_SERVER  = st.session_state.get("model_url")
 FEATURE_NAMES = [f"V{i}" for i in range(1, 29)] + ["Amount_scaled", "Time_scaled"]
 
 # ── session state ─────────────────────────────────────────────────────────────
