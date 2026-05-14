@@ -27,6 +27,7 @@ Endpoints:
 
 from __future__ import annotations
 
+from cProfile import run
 from contextlib import asynccontextmanager
 import logging
 import os
@@ -38,6 +39,9 @@ import requests as http
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from pydantic import BaseModel
+import time
+
+from api.run_store import save_run, get_run, list_all_runs
 
 load_dotenv()
 
@@ -65,11 +69,6 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
-
-# ── in-memory run registry ────────────────────────────────────────────────────
-# Maps thread_id → run state dict.
-# In production this would be Redis or a DB. For local dev, in-memory is fine.
-runs: dict[str, dict[str, Any]] = {}
 
 # ── pydantic models ───────────────────────────────────────────────────────────
 
@@ -99,9 +98,12 @@ async def _execute_pipeline(thread_id: str, model_id: str, environment: str):
     Background task — runs the full pipeline and updates the runs registry.
     Catches GraphInterrupt to surface the human approval pause.
     """
-    runs[thread_id]["status"]       = "running"
-    runs[thread_id]["started_at"]   = datetime.now(timezone.utc).isoformat()
-    runs[thread_id]["current_agent"] = "monitor"
+
+    run = get_run(thread_id)
+    run["status"]       = "running"
+    run["started_at"]   = datetime.now(timezone.utc).isoformat()
+    run["current_agent"] = "monitor"
+    save_run(thread_id, run)
 
     try:
         app_graph = _build_graph()
@@ -118,60 +120,65 @@ async def _execute_pipeline(thread_id: str, model_id: str, environment: str):
             node_name = list(event.keys())[0]
             node_out  = event[node_name] or {}
 
-            runs[thread_id]["current_agent"] = node_name
+            run["current_agent"] = node_name
 
             if "severity" in node_out:
-                runs[thread_id]["severity"] = node_out["severity"]
+                run["severity"] = node_out["severity"]
             if "diagnosis" in node_out:
-                runs[thread_id]["diagnosis"] = node_out["diagnosis"]
+                run["diagnosis"] = node_out["diagnosis"]
             if "recommended_action" in node_out:
-                runs[thread_id]["recommended_action"] = node_out["recommended_action"]
+                run["recommended_action"] = node_out["recommended_action"]
             if "remediation_status" in node_out:
-                runs[thread_id]["remediation_status"] = node_out["remediation_status"]
+                run["remediation_status"] = node_out["remediation_status"]
             if "incident_id" in node_out:
-                runs[thread_id]["incident_id"] = node_out["incident_id"]
+                run["incident_id"] = node_out["incident_id"]
             if "report" in node_out:
-                runs[thread_id]["report"] = node_out["report"]
+                run["report"] = node_out["report"]
             if "remediation_action" in node_out:
-                runs[thread_id]["remediation_action"] = node_out["remediation_action"]
+                run["remediation_action"] = node_out["remediation_action"]
             if "remediation_detail" in node_out:
-                runs[thread_id]["remediation_detail"] = node_out["remediation_detail"]
+                run["remediation_detail"] = node_out["remediation_detail"]
             if "diagnosis_json" in node_out:
-                runs[thread_id]["diagnosis_json"] = node_out["diagnosis_json"]
+                run["diagnosis_json"] = node_out["diagnosis_json"]
             if "retrain_prescription" in node_out:
-                runs[thread_id]["retrain_prescription"] = node_out["retrain_prescription"]
+                run["retrain_prescription"] = node_out["retrain_prescription"]
             if "drifted_features" in node_out:
-                runs[thread_id]["drifted_features"] = node_out["drifted_features"]
+                run["drifted_features"] = node_out["drifted_features"]
             if "similar_incidents" in node_out:
-                runs[thread_id]["similar_incidents"] = node_out["similar_incidents"]
+                run["similar_incidents"] = node_out["similar_incidents"]
             if "relevant_runbooks" in node_out:
-                runs[thread_id]["relevant_runbooks"] = node_out["relevant_runbooks"]
+                run["relevant_runbooks"] = node_out["relevant_runbooks"]
             if "notifications_sent" in node_out:
-                runs[thread_id]["notifications_sent"] = node_out["notifications_sent"]
+                run["notifications_sent"] = node_out["notifications_sent"]
             if "messages" in node_out:
-                runs[thread_id]["messages"] = [
+                run["messages"] = [
                     m.content if hasattr(m, "content") else str(m)
                     for m in node_out["messages"]
                 ]
 
-        runs[thread_id]["status"]       = "completed"
-        runs[thread_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
+        run["status"]       = "completed"
+        run["completed_at"] = datetime.now(timezone.utc).isoformat()
 
     except Exception as exc:
         exc_name = type(exc).__name__
         if "GraphInterrupt" in exc_name or "interrupt" in str(exc).lower():
-            runs[thread_id]["status"] = "awaiting_approval"
+            run["status"] = "awaiting_approval"
             logger.info("Pipeline paused at human approval — thread %s", thread_id)
         else:
-            runs[thread_id]["status"] = "failed"
-            runs[thread_id]["error"]  = str(exc)
+            run["status"] = "failed"
+            run["error"]  = str(exc)
             logger.error("Pipeline failed for thread %s: %s", thread_id, exc)
+    finally:
+        save_run(thread_id, run)
 
 
 async def _resume_pipeline(thread_id: str, approved: bool):
     """Background task — resumes a paused pipeline after human decision."""
-    runs[thread_id]["status"]       = "running"
-    runs[thread_id]["current_agent"] = "remediation"
+
+    run = get_run(thread_id)
+    run["status"]       = "running"
+    run["current_agent"] = "remediation"
+    save_run(thread_id, run)
 
     try:
         app_graph    = _build_graph()
@@ -181,44 +188,46 @@ async def _resume_pipeline(thread_id: str, approved: bool):
         for event in app_graph.stream(resume_state, config=config):
             node_name = list(event.keys())[0]
             node_out  = event[node_name] or {}
-            runs[thread_id]["current_agent"] = node_name
+            run["current_agent"] = node_name
 
             if "remediation_status" in node_out:
-                runs[thread_id]["remediation_status"] = node_out["remediation_status"]
+                run["remediation_status"] = node_out["remediation_status"]
             if "incident_id" in node_out:
-                runs[thread_id]["incident_id"] = node_out["incident_id"]
+                run["incident_id"] = node_out["incident_id"]
             if "report" in node_out:
-                runs[thread_id]["report"] = node_out["report"]
+                run["report"] = node_out["report"]
             if "remediation_action" in node_out:
-                runs[thread_id]["remediation_action"] = node_out["remediation_action"]
+                run["remediation_action"] = node_out["remediation_action"]
             if "remediation_detail" in node_out:
-                runs[thread_id]["remediation_detail"] = node_out["remediation_detail"]
+                run["remediation_detail"] = node_out["remediation_detail"]
             if "diagnosis_json" in node_out:
-                runs[thread_id]["diagnosis_json"] = node_out["diagnosis_json"]
+                run["diagnosis_json"] = node_out["diagnosis_json"]
             if "retrain_prescription" in node_out:
-                runs[thread_id]["retrain_prescription"] = node_out["retrain_prescription"]
+                run["retrain_prescription"] = node_out["retrain_prescription"]
             if "drifted_features" in node_out:
-                runs[thread_id]["drifted_features"] = node_out["drifted_features"]
+                run["drifted_features"] = node_out["drifted_features"]
             if "similar_incidents" in node_out:
-                runs[thread_id]["similar_incidents"] = node_out["similar_incidents"]
+                run["similar_incidents"] = node_out["similar_incidents"]
             if "relevant_runbooks" in node_out:
-                runs[thread_id]["relevant_runbooks"] = node_out["relevant_runbooks"]
+                run["relevant_runbooks"] = node_out["relevant_runbooks"]
             if "notifications_sent" in node_out:
-                runs[thread_id]["notifications_sent"] = node_out["notifications_sent"]
+                run["notifications_sent"] = node_out["notifications_sent"]
             if "messages" in node_out:
-                runs[thread_id]["messages"] = [
+                run["messages"] = [
                     m.content if hasattr(m, "content") else str(m)
                     for m in node_out["messages"]
                 ]
 
-        runs[thread_id]["status"]       = "completed"
-        runs[thread_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
-        runs[thread_id]["human_approved"] = approved
+        run["status"]       = "completed"
+        run["completed_at"] = datetime.now(timezone.utc).isoformat()
+        run["human_approved"] = approved
 
     except Exception as exc:
-        runs[thread_id]["status"] = "failed"
-        runs[thread_id]["error"]  = str(exc)
+        run["status"] = "failed"
+        run["error"]  = str(exc)
         logger.error("Resume failed for thread %s: %s", thread_id, exc)
+    finally:
+        save_run(thread_id, run)
 
 # ── pipeline run endpoints ────────────────────────────────────────────────────
 
@@ -227,7 +236,7 @@ async def trigger_run(req: RunRequest, background_tasks: BackgroundTasks):
     """Trigger a new monitoring pipeline run. Returns immediately with thread_id."""
     thread_id = str(uuid.uuid4())
 
-    runs[thread_id] = {
+    run_data = {
         "thread_id":           thread_id,
         "model_id":            req.model_id,
         "environment":         req.environment,
@@ -242,6 +251,7 @@ async def trigger_run(req: RunRequest, background_tasks: BackgroundTasks):
         "human_approved":      None,
         "error":               None,
         "created_at":          datetime.now(timezone.utc).isoformat(),
+        "created_at_ts":       time.time(),
         "started_at":          None,
         "completed_at":        None,
         "remediation_action":   None,
@@ -255,6 +265,8 @@ async def trigger_run(req: RunRequest, background_tasks: BackgroundTasks):
         "messages":             [],
     }
 
+    save_run(thread_id, run_data)
+
     background_tasks.add_task(
         _execute_pipeline, thread_id, req.model_id, req.environment
     )
@@ -266,25 +278,22 @@ async def trigger_run(req: RunRequest, background_tasks: BackgroundTasks):
 @app.get("/runs")
 async def list_runs():
     """List all runs sorted newest first."""
-    return sorted(
-        runs.values(),
-        key=lambda r: r.get("created_at", ""),
-        reverse=True,
-    )
+    return list_all_runs()
 
 
 @app.get("/runs/{thread_id}")
 async def get_run(thread_id: str):
     """Get the current state of a single pipeline run."""
-    if thread_id not in runs:
+    run = get_run(thread_id)
+    if not run:
         raise HTTPException(404, f"Thread {thread_id} not found")
-    return runs[thread_id]
+    return run
 
 
 @app.post("/runs/{thread_id}/approve", status_code=202)
 async def approve_run(thread_id: str, background_tasks: BackgroundTasks):
     """Approve a pipeline paused at the human approval checkpoint."""
-    run = runs.get(thread_id)
+    run = get_run(thread_id)
     if not run:
         raise HTTPException(404, f"Thread {thread_id} not found")
     if run["status"] != "awaiting_approval":
@@ -297,7 +306,7 @@ async def approve_run(thread_id: str, background_tasks: BackgroundTasks):
 @app.post("/runs/{thread_id}/reject", status_code=202)
 async def reject_run(thread_id: str, background_tasks: BackgroundTasks):
     """Reject a pipeline paused at the human approval checkpoint."""
-    run = runs.get(thread_id)
+    run = get_run(thread_id)
     if not run:
         raise HTTPException(404, f"Thread {thread_id} not found")
     if run["status"] != "awaiting_approval":
