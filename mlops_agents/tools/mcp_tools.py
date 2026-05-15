@@ -105,6 +105,8 @@ def trigger_retraining_pipeline(
 
                 # current degraded metrics (for the workflow log)
                 "current_metrics":       json.dumps(current_metrics),
+
+                "drift_dataset": prescription.get("drift_dataset", ""),
             },
         }
 
