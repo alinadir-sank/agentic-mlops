@@ -126,19 +126,14 @@ def monitor_agent(state: AgentState, rag: RAGStore) -> AgentState:
     except MetricsSourceError as exc:
         metrics = {"model_id": model_id, "environment": environment, "fetch_error": str(exc)}
 
-    # 2. Fetch reference baseline distribution from model run artifact (Uses the dynamic model_version)
+    model_details = client.get_model_version(name=model_id, version=model_version) 
     ref_histograms = None
-    try:
-        model_details = client.get_model_version(name=model_id, version=model_version)
-        local_path = client.download_artifacts(model_details.run_id, "reference_histograms.json")
-        ref_histograms = json.loads(Path(local_path).read_text())
-    except Exception as exc:
-        logger.warning("Could not load reference histograms from MLflow: %s", exc)
-
-    # 3. Fetch production distribution from MLflow registry tags (Uses the dynamic model_version)
     prod_histograms = None
     try:
-        model_details = client.get_model_version(name=model_id, version=model_version)
+        # 2. Fetch reference baseline distribution from model run artifact (Uses the dynamic model_version)
+        local_path = client.download_artifacts(model_details.run_id, "reference_histograms.json")
+        ref_histograms = json.loads(Path(local_path).read_text())
+        # 3. Fetch production distribution from MLflow registry tags (Uses the dynamic model_version)
         prod_hist_str = model_details.tags.get("latest_production_histogram", "{}")
         prod_histograms = json.loads(prod_hist_str)
     except Exception as exc:
