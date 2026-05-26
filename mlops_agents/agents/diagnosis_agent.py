@@ -25,9 +25,6 @@ DataStrategy = Literal["recent_window", "full_history",
                        "weighted_recent", "drift_period_only"]
 OptimizeFor = Literal["f2_score", "roc_auc", "recall", "precision"]
 DeploymentStrategy = Literal["canary", "blue_green", "immediate"]
-DriftDatasets = Literal["baseline", "data_drift_amount", "data_drift_features", "concept_drift",
-                        "mixed_drift", "gradual_drift_step_1", "gradual_drift_step_2", "gradual_drift_step_3"]
-
 # ---------------------------------------------------------------------------
 # YOUR ORIGINAL PYDANTIC SCHEMAS (Preserved Exactly)
 # ---------------------------------------------------------------------------
@@ -81,10 +78,6 @@ class RetrainPrescription(BaseModel):
     shadow_period_hours: int = Field(
         default=2,
         description="Hours to run the new model in shadow mode before promotion.",
-    )
-    drift_dataset: DriftDatasets = Field(
-        default="baseline",
-        description="Which dataset to use for retraining"
     )
 
 

@@ -45,6 +45,7 @@ def trigger_retraining_pipeline(
     prescription:    dict         = None,
     current_metrics: dict         = None,
     triggered_by:    str          = "mlops-agent",
+    active_dataset:  str          = "baseline",
 ) -> dict[str, Any]:
     """
     Dispatch a GitHub Actions workflow to retrain the model,
@@ -106,7 +107,7 @@ def trigger_retraining_pipeline(
                 # current degraded metrics (for the workflow log)
                 "current_metrics":       json.dumps(current_metrics),
 
-                "drift_dataset": prescription.get("drift_dataset", ""),
+                "drift_dataset": active_dataset,
             },
         }
 

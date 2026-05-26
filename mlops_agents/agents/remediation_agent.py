@@ -33,6 +33,8 @@ def remediation_agent(state: AgentState) -> AgentState:
     Dispatches tools based on structured recommendations from the Diagnosis Agent.
     """
     metrics: dict = state.get("metrics") or {}
+
+    active_dataset = metrics.get("active_dataset", "unknown")
     
     # 1. FIXED: Extract using the uniform key 'remediation_action' set by the Diagnosis Agent
     action: str = state.get("remediation_action", "none")
@@ -70,32 +72,8 @@ def remediation_agent(state: AgentState) -> AgentState:
                 severity=severity,
                 prescription=prescription,
                 current_metrics=metrics,
+                active_dataset=active_dataset,
             )
-            
-            # 3. NEW: If retraining succeeds, capture the version and update the MLflow 'champion' alias
-            if result.get("status") == "success":
-                try:
-                    mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI"))
-                    client = MlflowClient()
-                    
-                    # Read the version written by train.py at the end of the run
-                    meta_dir = Path(os.getenv("MODEL_DIR", "./model"))
-                    version_file = meta_dir / "latest_version.txt"
-                    
-                    if version_file.exists():
-                        new_version = version_file.read_text().strip()
-                        
-                        # Atomic alias switch inside the centralized MLflow registry
-                        client.set_registered_model_alias(
-                            name=model_id,
-                            alias="champion",
-                            version=str(new_version)
-                        )
-                        result["detail"] += f" | MLflow 'champion' alias moved to Version {new_version}."
-                        logger.info("Successfully promoted Model %s Version %s to 'champion'", model_id, new_version)
-                except Exception as alias_err:
-                    logger.error("Retraining completed but MLflow alias assignment failed: %s", alias_err)
-                    result["detail"] += f" | [Warning] Alias assignment failed: {alias_err}"
 
         elif action == "scale_infrastructure":
             result = scale_deployment(model_id=model_id, environment=environment)
