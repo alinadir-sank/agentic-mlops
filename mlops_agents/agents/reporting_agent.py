@@ -24,30 +24,7 @@ from mlops_agents.agents.threshold_manager import run_threshold_update
 logger = logging.getLogger(__name__)
 
 from dotenv import load_dotenv
-
-
 load_dotenv()
-
-
-# ---------------------------------------------------------------------------
-# Threshold learning config
-# ---------------------------------------------------------------------------
-
-THRESHOLD_LIMITS = {
-    "accuracy_major": (0.6, 0.85),
-    "accuracy_critical": (0.5, 0.75),
-
-    "drift_major": (0.1, 0.7),
-    "drift_critical": (0.3, 0.9),
-
-    "latency_major_ms": (500, 3000),
-    "latency_critical_ms": (1000, 5000),
-
-    "error_rate_major": (0.01, 0.2),
-    "error_rate_critical": (0.05, 0.3),
-}
-
-MAX_THRESHOLD_DELTA = 0.02
 
 
 # ---------------------------------------------------------------------------
@@ -210,150 +187,102 @@ def _llm_executive_summary(state: AgentState, report: str) -> str:
 def reporting_agent(state: AgentState, rag: RAGStore) -> AgentState:
     """
     LangGraph node — Reporting Agent.
+    Aggregates diagnosis metrics, strips telemetry histogram payloads for vector safety,
+    persists history snapshots to RAG memory, and triggers threshold optimizations.
     """
-
     metrics: dict = state.get("metrics") or {}
-
     severity: str = state.get("severity", "none")
-    model_id: str = metrics.get("model_id", "unknown")
-    environment: str = metrics.get("environment", "production")
+    
+    # Extract structural names using our updated metadata object patterns
+    metadata = metrics.get("metadata") or {}
+    model_id: str = state.get("model_id") or metadata.get("model_name", "unknown")
+    environment: str = state.get("environment", "production")
 
-    logger.info(
-        "Reporting Agent: generating report for %s (%s)",
-        model_id,
-        environment,
-    )
+    logger.info("Reporting Agent: generating incident report for %s (%s)", model_id, environment)
 
-    # ------------------------------------------------------------------
-    # Historical stats
-    # ------------------------------------------------------------------
-
+    # 1. Historical Stats retrieval from vector layer
     historical_stats = rag.get_incident_stats(
         model_id=model_id,
         environment=environment,
     )
 
-    # ------------------------------------------------------------------
-    # Build report
-    # ------------------------------------------------------------------
-
+    # 2. Build report string context payload layout
     report = _build_report(state, historical_stats)
 
-    # ------------------------------------------------------------------
-    # Save incident
-    # ------------------------------------------------------------------
+    # 3. CRITICAL STRUCTURAL ADJUSTMENT: Prepare a vector-optimized state copy.
+    # We strip out the heavy histogram arrays so we don't bloat the vector database metadata attributes.
+    sanitized_metrics = {
+        k: v for k, v in metrics.items() 
+        if k not in ["reference_histograms", "production_histograms"]
+    }
+    # Track metadata summary stats instead of heavy matrices
+    sanitized_metrics["had_reference_histograms"] = "reference_histograms" in metrics
+    sanitized_metrics["had_production_histograms"] = "production_histograms" in metrics
 
-    state_with_report = {
+    vector_safe_state = {
         **state,
-        "report": report,
+        "metrics": sanitized_metrics,
+        "report": report
     }
 
-    incident_id = rag.save_incident(state_with_report)
+    # Save clean, optimized document footprint to RAG
+    incident_id = rag.save_incident(vector_safe_state)
+    logger.info("Saved compact incident snapshot to RAG database. Assigned ID: %s", incident_id)
 
-    logger.info("Saved incident to RAG: %s", incident_id)
-
+    # Replace temp tokens with valid incident identifiers
     report = report.replace("pending", incident_id, 1)
 
-    # ------------------------------------------------------------------
-    # Slack
-    # ------------------------------------------------------------------
-
+    # 4. Slack Channels Notification Handlers (Disabled via Env Flags based on your context)
     notifications: list[str] = []
-
-    slack_enabled = (
-        os.getenv("SLACK_NOTIFICATIONS_ENABLED", "true").lower() == "true"
-    )
+    slack_enabled = os.getenv("SLACK_NOTIFICATIONS_ENABLED", "false").lower() == "true"
 
     if slack_enabled:
-
-        summary = _llm_executive_summary(state, report)
-
-        slack_result = send_slack_notification(
-            message=summary,
-            severity=severity,
-            incident_id=incident_id,
-        )
-
-        if slack_result.get("status") == "success":
-            notifications.append("slack")
-        else:
-            logger.warning(
-                "Slack notification failed: %s",
-                slack_result.get("detail"),
+        try:
+            summary = _llm_executive_summary(state, report)
+            slack_result = send_slack_notification(
+                message=summary,
+                severity=severity,
+                incident_id=incident_id,
             )
+            if slack_result.get("status") == "success":
+                notifications.append("slack")
+        except Exception as err:
+            logger.warning("Slack reporting interface bypassed or error encountered: %s", err)
 
-    # ------------------------------------------------------------------
-    # Email
-    # ------------------------------------------------------------------
-
+    # 5. Email Alert Dispatch Handling (Disabled via Env Flags based on your context)
     email_min_severity = os.getenv("EMAIL_MIN_SEVERITY", "major")
-
-    severity_rank = {
-        "none": 0,
-        "minor": 1,
-        "major": 2,
-        "critical": 3,
-    }
-
-    should_email = (
-        severity_rank.get(severity, 0)
-        >= severity_rank.get(email_min_severity, 2)
-    )
-
-    email_enabled = (
-        os.getenv("EMAIL_NOTIFICATIONS_ENABLED", "true").lower() == "true"
-    )
+    severity_rank = {"none": 0, "minor": 1, "major": 2, "critical": 3}
+    
+    should_email = severity_rank.get(severity, 0) >= severity_rank.get(email_min_severity, 2)
+    email_enabled = os.getenv("EMAIL_NOTIFICATIONS_ENABLED", "false").lower() == "true"
 
     if should_email and email_enabled:
-
-        email_result = send_email_alert(
-            subject=(
-                f"[MLOps {severity.upper()}] "
-                f"{model_id} degradation — {incident_id}"
-            ),
-            body=report,
-            severity=severity,
-            incident_id=incident_id,
-        )
-
-        if email_result.get("status") == "success":
-            notifications.append("email")
-        else:
-            logger.warning(
-                "Email alert failed: %s",
-                email_result.get("detail"),
+        try:
+            email_result = send_email_alert(
+                subject=f"[MLOps {severity.upper()}] {model_id} degradation — {incident_id}",
+                body=report,
+                severity=severity,
+                incident_id=incident_id,
             )
+            if email_result.get("status") == "success":
+                notifications.append("email")
+        except Exception as err:
+            logger.warning("Email reporting interface bypassed or error encountered: %s", err)
 
-    logger.info(
-        "Reporting complete. incident_id=%s notifications=%s",
-        incident_id,
-        notifications,
-    )
+    logger.info("Reporting sequence complete. incident_id=%s notifications=%s", incident_id, notifications)
 
-    # ------------------------------------------------------------------
-    # Threshold learning
-    # ------------------------------------------------------------------
-
+    # 6. Threshold learning (Feeds tuned boundary rules back into RAG for Monitor Node ingestion)
     try:
         run_threshold_update(state, rag)
     except Exception as exc:
-        logger.error(
-            "Threshold learning failed: %s",
-            exc,
-        )
+        logger.error("Dynamic threshold tuning optimizer failed: %s", exc)
 
     return {
         **state,
         "report": report,
         "incident_id": incident_id,
         "notifications_sent": notifications,
-        "messages": state.get("messages", [])
-        + [
-            HumanMessage(
-                content=(
-                    f"[Reporting] incident_id={incident_id} "
-                    f"notifications={notifications}"
-                )
-            )
-        ],
+        "messages": state.get("messages", []) + [
+            HumanMessage(content=f"[Reporting] Compiled incident_id={incident_id}. Actions completed.")
+        ]
     }
