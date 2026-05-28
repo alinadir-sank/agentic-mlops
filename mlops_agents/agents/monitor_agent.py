@@ -112,32 +112,40 @@ def monitor_agent(state: AgentState, rag: RAGStore) -> AgentState:
     mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI"))
     client = MlflowClient()
 
-    # 1. NEW: Resolve the active version integer dynamically via the "champion" alias
+    # 1. Resolve the active champion version identifier first (The Source of Truth)
     try:
         alias_metadata = client.get_model_version_by_alias(name=model_id, alias="champion")
-        model_version = alias_metadata.version  # Dynamically yields "1", "2", "3", etc.
-        logger.info("Resolved active champion version for monitoring: %s", model_version)
+        model_version = alias_metadata.version       # e.g., "3"
+        training_run_id = alias_metadata.run_id      # The actual run ID that trained the model!
     except Exception as exc:
-        logger.error("Failed to resolve 'champion' alias in MLflow. Falling back to version '1': %s", exc)
-        model_version = "1"
+        logger.error("Failed resolving 'champion' alias in MLflow: %s", exc)
+        return {**state, "severity": "none"}
 
+    # 2. Fetch performance numbers from the latest metrics snapshot matching this model ID
     try:
+        # Instead of generic search, explicitly fetch metrics from the tracking experiment
+        # or rely on the metrics payload returned natively by fetch_model_metrics()
         metrics = fetch_model_metrics(model_id=model_id, environment=environment, window_minutes=15)
-    except MetricsSourceError as exc:
-        metrics = {"model_id": model_id, "environment": environment, "fetch_error": str(exc)}
+    except Exception as exc:
+        metrics = {"fetch_error": str(exc)}
 
-    model_details = client.get_model_version(name=model_id, version=model_version) 
+    # 3. ALIGNED: Fetch reference baseline distribution from the TRAINING run ID (Not the metric run)
     ref_histograms = None
+    try:
+        # Guarantees we download from the true training run containing the file asset
+        local_path = client.download_artifacts(training_run_id, "reference_histograms.json")
+        ref_histograms = json.loads(Path(local_path).read_text())
+    except Exception as exc:
+        logger.warning("Could not load reference histograms from training run %s: %s", training_run_id, exc)
+
+    # 4. ALIGNED: Fetch live production distribution from Registry Tags directly
     prod_histograms = None
     try:
-        # 2. Fetch reference baseline distribution from model run artifact (Uses the dynamic model_version)
-        local_path = client.download_artifacts(model_details.run_id, "reference_histograms.json")
-        ref_histograms = json.loads(Path(local_path).read_text())
-        # 3. Fetch production distribution from MLflow registry tags (Uses the dynamic model_version)
+        model_details = client.get_model_version(name=model_id, version=model_version)
         prod_hist_str = model_details.tags.get("latest_production_histogram", "{}")
         prod_histograms = json.loads(prod_hist_str)
     except Exception as exc:
-        logger.warning("Could not fetch live production histograms from MLflow tags: %s", exc)
+        logger.warning("Could not fetch live production histograms from model registry: %s", exc)
 
     thresholds = _get_thresholds(model_id, rag)
     trend = rag.query_recent_metrics(model_id=model_id, n_results=10, environment=environment)
