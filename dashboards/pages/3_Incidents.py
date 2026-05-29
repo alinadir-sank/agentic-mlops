@@ -4,6 +4,7 @@ dashboard/pages/3_Incidents.py
 Incident history — ChromaDB incident feed, severity filter, detail view.
 """
 
+import json
 import streamlit as st
 import requests
 from utils.session import init_session
@@ -230,3 +231,56 @@ else:
                     </table>
                 </div>
                 """, unsafe_allow_html=True)
+            
+            # Parse and display raw incident payload (diagnosis, reasoning, full report)
+            raw_payload = selected.get("raw_payload", {})
+            if isinstance(raw_payload, str):
+                try:
+                    raw_payload = json.loads(raw_payload)
+                except json.JSONDecodeError:
+                    raw_payload = {}
+            
+            diagnosis = raw_payload.get("diagnosis", "")
+            recommendation = raw_payload.get("recommended_action", "")
+            remediation_action = raw_payload.get("remediation_action", "")
+            remediation_detail = raw_payload.get("remediation_detail", "")
+            report = raw_payload.get("report", "")
+            
+            # Diagnosis section
+            if diagnosis or recommendation:
+                section("Root Cause Analysis")
+                rc1, rc2 = st.columns([2, 1])
+                with rc1:
+                    if diagnosis:
+                        st.markdown(f"""
+                        <div style="background:#111318;border:1px solid #1f2330;border-radius:8px;padding:16px;">
+                            <div style="font-size:0.65rem;color:#555c72;letter-spacing:0.12em;margin-bottom:10px;">DIAGNOSIS</div>
+                            <div style="font-size:0.82rem;color:#8b91a8;line-height:1.6;">{diagnosis}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                with rc2:
+                    if recommendation:
+                        st.markdown(f"""
+                        <div style="background:#111318;border:1px solid #1f2330;border-radius:8px;padding:16px;">
+                            <div style="font-size:0.65rem;color:#555c72;letter-spacing:0.12em;margin-bottom:10px;">RECOMMENDATION</div>
+                            <div style="font-size:0.8rem;color:#00d4ff;font-weight:600;">{recommendation}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+            
+            # Remediation section
+            if remediation_action or remediation_detail:
+                section("Remediation Trace")
+                st.markdown(f"""
+                <div style="background:#111318;border:1px solid #1f2330;border-radius:8px;padding:16px;">
+                    <table style="width:100%;border-collapse:collapse;font-size:0.78rem;">
+                        {f"<tr><td style='color:#555c72;padding:5px 0;'>Action</td><td style='color:#e8eaf0;text-align:right;'>{remediation_action}</td></tr>" if remediation_action else ""}
+                        {f"<tr><td style='color:#555c72;padding:5px 0;'>Detail</td><td style='color:#8b91a8;text-align:right;'>{remediation_detail}</td></tr>" if remediation_detail else ""}
+                    </table>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # Full report (expandable)
+            if report:
+                section("Full Incident Report")
+                with st.expander("📋 View full markdown report", expanded=False):
+                    st.markdown(report)
