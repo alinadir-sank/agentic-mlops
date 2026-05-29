@@ -272,6 +272,7 @@ def reporting_agent(state: AgentState, rag: RAGStore) -> AgentState:
     logger.info("Reporting sequence complete. incident_id=%s notifications=%s", incident_id, notifications)
 
     # 6. Threshold learning (Feeds tuned boundary rules back into RAG for Monitor Node ingestion)
+    print(f"[Reporting Agent] Initiating threshold optimization for model {model_id} in environment {environment}")
     try:
         run_threshold_update(state, rag)
     except Exception as exc:

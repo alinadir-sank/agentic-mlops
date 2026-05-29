@@ -16,8 +16,6 @@ logger = logging.getLogger(__name__)
 THRESHOLD_LIMITS = {
     "accuracy_major": (0.6, 0.85),
     "accuracy_critical": (0.5, 0.75),
-    "drift_major": (0.1, 0.7),
-    "drift_critical": (0.3, 0.9),
     "latency_major_ms": (500.0, 3000.0),
     "latency_critical_ms": (1000.0, 5000.0),
     "error_rate_major": (0.01, 0.2),
@@ -31,8 +29,6 @@ class MetricDeltas(BaseModel):
     # --- Percentage Bounded Metrics (0.0 to 1.0 scales) ---
     accuracy_major: Optional[float] = Field(default=0.0, description="Delta adjustment for major accuracy.")
     accuracy_critical: Optional[float] = Field(default=0.0, description="Delta adjustment for critical accuracy.")
-    drift_major: Optional[float] = Field(default=0.0, description="Delta adjustment for major drift score.")
-    drift_critical: Optional[float] = Field(default=0.0, description="Delta adjustment for critical drift score.")
     error_rate_major: Optional[float] = Field(default=0.0, description="Delta adjustment for major error rate.")
     error_rate_critical: Optional[float] = Field(default=0.0, description="Delta adjustment for critical error rate.")
 
@@ -48,7 +44,6 @@ class MetricDeltas(BaseModel):
         """
         pct_fields = [
             "accuracy_major", "accuracy_critical", 
-            "drift_major", "drift_critical", 
             "error_rate_major", "error_rate_critical"
         ]
         
@@ -83,13 +78,14 @@ def _clamp_thresholds(thresholds: dict) -> dict:
             thresholds[key] = max(low, min(high, float(thresholds[key])))
     return thresholds
 
-def _compute_drift_trend(trend: list[dict]) -> str:
+def _compute_accuracy_trend(trend: list[dict]) -> str:
+    """Compute trend direction for accuracy metric."""
     if len(trend) < 3: return "flat"
-    vals = [m.get("drift_score", 0.0) for m in trend[:5] if m.get("drift_score") is not None]
+    vals = [m.get("accuracy", 0.0) for m in trend[:5] if m.get("accuracy") is not None]
     if len(vals) < 3: return "flat"
-    # Index 0 is newest. If index 0 is greater than index -1, drift is actively climbing.
-    if vals[0] > vals[-1] * 1.1: return "increasing"
-    if vals[0] < vals[-1] * 0.9: return "decreasing"
+    # Index 0 is newest. If index 0 is less than index -1, accuracy is declining.
+    if vals[0] < vals[-1] * 0.95: return "declining"
+    if vals[0] > vals[-1] * 1.05: return "improving"
     return "flat"
 
 def _llm_threshold_advisor(
@@ -125,7 +121,7 @@ def _llm_threshold_advisor(
 Your task: Propose minor metric alert threshold adjustments to balance sensitivity and false-positive fatigue.
 
 Rules:
-- For ratio/percentage metrics (accuracy, drift, error_rate), max delta step is +/-0.02.
+- For ratio/percentage metrics (accuracy, error_rate), max delta step is +/-0.02.
 - For latency metrics (latency_major_ms, latency_critical_ms), propose real millisecond adjustments (e.g., +25.0, -50.0). Max steps are limited to 100ms/200ms.
 
 Current baseline thresholds:
@@ -145,6 +141,7 @@ Historical metadata snapshots:
 Recent sliding telemetry run trends:
 {json.dumps(trend[:5], indent=2)}
 """
+    print(f"[Threshold Advisor] Generated Prompt: {prompt}")
     try:
         response = llm.invoke([
             SystemMessage(content="You are an adaptive threshold schema tuner."),
@@ -181,7 +178,9 @@ def run_threshold_update(state: AgentState, rag: RAGStore) -> None:
     lr = min(0.1, 1 / max(hist_stats.get("total", 1), 1))
 
     proposal = _llm_threshold_advisor(state, thresholds, hist_stats, trend)
-    if not proposal.get("should_update"): return
+    if not proposal.get("should_update"):
+        print(f"[Threshold Manager] No update needed for model {model_id}")
+        return
 
     conf = max(0.0, min(1.0, float(proposal.get("confidence", 0.0))))
     applied = {}
@@ -199,12 +198,14 @@ def run_threshold_update(state: AgentState, rag: RAGStore) -> None:
             thresholds[key] += eff_delta
             applied[key] = eff_delta
     
-    # Programmatic drift trend protection step
-    if _compute_drift_trend(trend) == "increasing" and "drift_major" in thresholds:
-        thresholds["drift_major"] -= (0.005 * lr) # Adjusted step size to prevent over-corrections
+    # Programmatic accuracy trend protection step
+    if _compute_accuracy_trend(trend) == "declining" and "accuracy_major" in thresholds:
+        print(f"[Threshold Manager] Detected declining accuracy trend for model {model_id}")
+        thresholds["accuracy_major"] -= (0.005 * lr) # Adjusted step size to prevent over-corrections
 
     # Commit values back to database telemetry configurations
     rag.save_dynamic_thresholds(model_id=model_id, thresholds={
         "model_id": model_id, "environment": env, "updated_at": now.isoformat(),
         "thresholds": _clamp_thresholds(thresholds), "applied_adjustments": applied
     })
+    print(f"[Threshold Manager] Updated thresholds for model {model_id}")
