@@ -101,7 +101,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# ── in-memory run registry ────────────────────────────────────────────────────
+# ── run registry (now persisted in ChromaDB) ──────────────────────────────────
+# NOTE: Runs are now stored in ChromaDB via RAGStore._runs collection.
+# The in-memory dict below is used as a cache during this request cycle.
 runs: dict[str, dict[str, Any]] = {}
 
 # ── in-memory generator state ─────────────────────────────────────────────────
@@ -136,9 +138,13 @@ def _build_graph():
 
 
 async def _execute_pipeline(thread_id: str, model_id: str, environment: str):
+    from mlops_agents.rag.store import RAGStore
+    rag = RAGStore()
+
     runs[thread_id]["status"]        = "running"
     runs[thread_id]["started_at"]    = datetime.now(timezone.utc).isoformat()
     runs[thread_id]["current_agent"] = "monitor"
+    rag.save_run(thread_id, runs[thread_id])
 
     try:
         app_graph = _build_graph()
@@ -171,8 +177,12 @@ async def _execute_pipeline(thread_id: str, model_id: str, environment: str):
                     for m in node_out["messages"]
                 ]
 
+            # Persist to ChromaDB after each update
+            rag.save_run(thread_id, runs[thread_id])
+
         runs[thread_id]["status"]       = "completed"
         runs[thread_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
+        rag.save_run(thread_id, runs[thread_id])
 
     except Exception as exc:
         exc_name = type(exc).__name__
@@ -183,11 +193,16 @@ async def _execute_pipeline(thread_id: str, model_id: str, environment: str):
             runs[thread_id]["status"] = "failed"
             runs[thread_id]["error"]  = str(exc)
             logger.error("Pipeline failed for thread %s: %s", thread_id, exc)
+        rag.save_run(thread_id, runs[thread_id])
 
 
 async def _resume_pipeline(thread_id: str, approved: bool):
+    from mlops_agents.rag.store import RAGStore
+    rag = RAGStore()
+
     runs[thread_id]["status"]        = "running"
     runs[thread_id]["current_agent"] = "remediation"
+    rag.save_run(thread_id, runs[thread_id])
 
     try:
         app_graph    = _build_graph()
@@ -214,14 +229,19 @@ async def _resume_pipeline(thread_id: str, approved: bool):
                     for m in node_out["messages"]
                 ]
 
+            # Persist to ChromaDB after each update
+            rag.save_run(thread_id, runs[thread_id])
+
         runs[thread_id]["status"]         = "completed"
         runs[thread_id]["completed_at"]   = datetime.now(timezone.utc).isoformat()
         runs[thread_id]["human_approved"] = approved
+        rag.save_run(thread_id, runs[thread_id])
 
     except Exception as exc:
         runs[thread_id]["status"] = "failed"
         runs[thread_id]["error"]  = str(exc)
         logger.error("Resume failed for thread %s: %s", thread_id, exc)
+        rag.save_run(thread_id, runs[thread_id])
 
 # ── pipeline run endpoints ────────────────────────────────────────────────────
 
@@ -268,20 +288,21 @@ async def trigger_run(req: RunRequest, background_tasks: BackgroundTasks):
 
 @app.get("/runs")
 async def list_runs():
-    """List all runs sorted newest first."""
-    return sorted(
-        runs.values(),
-        key=lambda r: r.get("created_at", ""),
-        reverse=True,
-    )
+    """List all runs sorted newest first (from ChromaDB)."""
+    from mlops_agents.rag.store import RAGStore
+    rag = RAGStore()
+    return rag.list_runs(limit=100)
 
 
 @app.get("/runs/{thread_id}")
 async def get_run(thread_id: str):
-    """Get the current state of a single pipeline run."""
-    if thread_id not in runs:
+    """Get the current state of a single pipeline run (from ChromaDB)."""
+    from mlops_agents.rag.store import RAGStore
+    rag = RAGStore()
+    run = rag.get_run(thread_id)
+    if not run:
         raise HTTPException(404, f"Thread {thread_id} not found")
-    return runs[thread_id]
+    return run
 
 
 @app.post("/runs/{thread_id}/approve", status_code=202)

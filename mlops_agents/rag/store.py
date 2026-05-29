@@ -57,6 +57,7 @@ class RAGStore:
         self._incidents = self._get_or_create("incidents")
         self._metrics = self._get_or_create("metrics_history")
         self._runbooks = self._get_or_create("runbooks")
+        self._runs = self._get_or_create("runs")
         logger.info("RAGStore initialised.")
 
     # ------------------------------------------------------------------
@@ -626,3 +627,126 @@ class RAGStore:
         except Exception as e:
             logger.error("Error retrieving dynamic thresholds: %s", e)
             return None
+
+    # ------------------------------------------------------------------
+    # Run storage (for API run tracking)
+    # ------------------------------------------------------------------
+
+    def save_run(self, thread_id: str, run_data: dict) -> str:
+        """
+        Persist or update a run in ChromaDB.
+
+        Args:
+            thread_id: Unique run identifier
+            run_data: Complete run state dict
+
+        Returns:
+            thread_id
+        """
+        now = self._now_iso()
+        thread_id = str(thread_id)
+
+        # Prepare metadata — only scalar types
+        metadata = self._flatten_meta(
+            {
+                "thread_id": thread_id,
+                "model_id": run_data.get("model_id", ""),
+                "environment": run_data.get("environment", ""),
+                "status": run_data.get("status", ""),
+                "severity": run_data.get("severity"),
+                "created_at": run_data.get("created_at", now),
+                "started_at": run_data.get("started_at"),
+                "completed_at": run_data.get("completed_at"),
+                "human_approved": run_data.get("human_approved"),
+                "updated_at": now,
+                "raw_payload": json.dumps(run_data),  # Full state as JSON
+            }
+        )
+
+        # Upsert — overwrite if thread_id already exists
+        self._runs.upsert(
+            ids=[thread_id],
+            documents=[run_data.get("diagnosis", run_data.get("status", ""))],  # Searchable text
+            metadatas=[metadata],
+        )
+        logger.info("Persisted run %s (status=%s)", thread_id, run_data.get("status"))
+        return thread_id
+
+    def get_run(self, thread_id: str) -> dict | None:
+        """
+        Retrieve a single run by thread_id.
+
+        Returns:
+            Complete run dict OR None if not found
+        """
+        try:
+            results = self._runs.get(
+                ids=[str(thread_id)],
+                include=["metadatas"],
+            )
+            if not results or not results.get("metadatas"):
+                return None
+
+            meta = results["metadatas"][0]
+            raw = meta.get("raw_payload")
+
+            if isinstance(raw, str):
+                try:
+                    return json.loads(raw)
+                except json.JSONDecodeError:
+                    logger.error("Failed to parse run payload for %s", thread_id)
+                    return None
+
+            return raw if isinstance(raw, dict) else None
+
+        except Exception as e:
+            logger.error("Error retrieving run %s: %s", thread_id, e)
+            return None
+
+    def list_runs(self, limit: int = 50, model_id: str | None = None) -> list[dict]:
+        """
+        Retrieve all runs, optionally filtered by model_id.
+
+        Args:
+            limit: Max results
+            model_id: Optional filter
+
+        Returns:
+            List of run dicts sorted newest first
+        """
+        try:
+            where_clause = None
+            if model_id:
+                where_clause = self._build_where_clause({"model_id": model_id})
+
+            results = self._runs.get(
+                where=where_clause,
+                include=["metadatas"],
+                limit=limit,
+            )
+
+            metas = results.get("metadatas") or []
+            runs = []
+
+            for meta in metas:
+                raw = meta.get("raw_payload")
+                if isinstance(raw, str):
+                    try:
+                        run_dict = json.loads(raw)
+                        runs.append(run_dict)
+                    except json.JSONDecodeError:
+                        continue
+                elif isinstance(raw, dict):
+                    runs.append(raw)
+
+            # Sort newest first by created_at
+            runs.sort(
+                key=lambda r: r.get("created_at", ""),
+                reverse=True,
+            )
+
+            return runs
+
+        except Exception as e:
+            logger.error("Error listing runs: %s", e)
+            return []
