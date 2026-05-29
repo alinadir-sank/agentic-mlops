@@ -102,10 +102,10 @@ def _build_severity_llm() -> Any:
         )
         .with_structured_output(SeverityClassification)
         .with_retry(
-            retry_if_exception_type=retry_if_exception_type(
-                (ValidationError, Exception)
-            ),
+            retry_if_exception_type=
+                (ValidationError, Exception),
             stop_after_attempt=3,
+            wait_exponential_jitter=True,
         )
     )
 
