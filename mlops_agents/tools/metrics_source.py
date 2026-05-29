@@ -397,20 +397,58 @@ class MLflowSource:
         run = runs.iloc[0]
 
         def _get(col: str) -> float | None:
-            v = run.get(f"metrics.{col}")
-            return float(v) if v is not None else None
+            # Support multiple possible metric key names returned by different
+            # evaluation pipelines (e.g. 'f1' vs 'f1_score', 'roc_auc' vs 'auc_roc').
+            candidates = [col]
+            # common aliases
+            aliases = {
+                "f1_score": ["f1", "f1_score"],
+                "auc_roc": ["roc_auc", "auc_roc"],
+                "avg_precision": ["avg_precision", "average_precision"],
+                "latency_ms": ["latency_ms", "latency"],
+            }
+            # expand candidates if alias map exists
+            for k, vals in aliases.items():
+                if col == k:
+                    candidates = vals
+                    break
 
+            for name in candidates:
+                v = run.get(f"metrics.{name}")
+                if v is not None:
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        return None
+            return None
+
+        # Collect metrics using tolerant key lookups
+        accuracy = _get("accuracy")
+        f1 = _get("f1_score")
+        precision = _get("precision")
+        recall = _get("recall")
+        auc = _get("auc_roc")
+        drift = _get("drift_score")
+        avg_prec = _get("avg_precision")
+        latency = _get("latency_ms")
+
+        # Map collected metrics into ModelMetrics shape. If the source only
+        # provides a single latency metric, place it into p95 bucket as a
+        # reasonable default for monitoring summaries.
         return ModelMetrics(
             model_id=model_id,
             model_version=run.get("tags.mlflow.source.git.commit", "unknown"),
             environment=environment,
             sampled_at=datetime.now(timezone.utc).isoformat(),
-            accuracy=_get("accuracy"),
-            f1_score=_get("f1_score"),
-            precision=_get("precision"),
-            recall=_get("recall"),
-            auc_roc=_get("auc_roc"),
-            drift_score=_get("drift_score"),
+            accuracy=accuracy,
+            f1_score=f1,
+            precision=precision,
+            recall=recall,
+            auc_roc=auc,
+            drift_score=drift,
+            throughput_rps=None,
+            latency_p95_ms=latency,
+            extras={"avg_precision": avg_prec} if avg_prec is not None else {},
         )
 
 
