@@ -494,30 +494,7 @@ async def start_generator(req: GeneratorStartRequest):
 @app.post("/generator/stop")
 async def stop_generator():
     """Stop the transaction generator subprocess."""
-    global _generator_proc, _generator_state
-
-    if not _proc_alive(_generator_proc):
-        _generator_state["running"] = False
-        return {"status": "not_running"}
-
-    try:
-        _generator_proc.terminate()
-        _generator_proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        _generator_proc.kill()
-    except Exception as e:
-        logger.warning("Error stopping generator: %s", e)
-
-    pid = _generator_state.get("pid")
-    _generator_proc = None
-    _generator_state = {
-        "running":    False,
-        "dataset":    _generator_state.get("dataset"),
-        "pid":        None,
-        "started_at": None,
-    }
-    logger.info("Generator stopped — pid=%s", pid)
-    return {"status": "stopped"}
+    return _stop_generator_process()
 
 
 @app.get("/generator/status")
