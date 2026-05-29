@@ -141,9 +141,8 @@ def monitor_agent(state: AgentState, rag: RAGStore) -> AgentState:
     # 4. ALIGNED: Fetch live production distribution from Registry Tags directly
     prod_histograms = None
     try:
-        model_details = client.get_model_version(name=model_id, version=model_version)
-        prod_hist_str = model_details.tags.get("latest_production_histogram", "{}")
-        prod_histograms = json.loads(prod_hist_str)
+        local_path = client.download_artifacts(training_run_id, "latest_production_histogram.json")
+        prod_histograms = json.loads(Path(local_path).read_text())
     except Exception as exc:
         logger.warning("Could not fetch live production histograms from model registry: %s", exc)
 
