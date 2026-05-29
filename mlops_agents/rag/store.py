@@ -346,6 +346,15 @@ class RAGStore:
         logger.debug("Saved metrics snapshot %s (severity=%s)", snapshot_id, severity)
         return snapshot_id
 
+    @staticmethod
+    def _build_where_clause(filters: dict[str, Any]) -> dict[str, Any] | None:
+        """Build a ChromaDB where clause for one or more metadata filters."""
+        if not filters:
+            return None
+        if len(filters) == 1:
+            return filters
+        return {"$and": [{k: v} for k, v in filters.items()]}
+
     def query_recent_metrics(
         self,
         model_id: str,
@@ -361,12 +370,12 @@ class RAGStore:
         if count == 0:
             return []
 
-        where: dict = {"model_id": model_id}
+        filters: dict[str, Any] = {"model_id": model_id}
         if environment:
-            where["environment"] = environment
+            filters["environment"] = environment
 
         results = self._metrics.get(
-            where=where,
+            where=self._build_where_clause(filters),
             include=["metadatas"],
             limit=n_results,
         )
@@ -548,10 +557,12 @@ class RAGStore:
         """
         try:
             results = self._metrics.get(
-                where={
-                    "model_id": model_id,
-                    "type": "threshold_config",
-                },
+                where=self._build_where_clause(
+                    {
+                        "model_id": model_id,
+                        "type": "threshold_config",
+                    }
+                ),
                 include=["metadatas"],
                 limit=5,  # small window, we'll sort anyway
             )

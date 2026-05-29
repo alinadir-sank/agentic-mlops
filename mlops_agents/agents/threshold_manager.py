@@ -99,6 +99,7 @@ def _llm_threshold_advisor(
     trend: list[dict],
 ) -> dict:
     """Invokes structured compiler over low-token formatted datasets."""
+    from tenacity import retry_if_exception_type
     model_name = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
     ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
@@ -107,9 +108,9 @@ def _llm_threshold_advisor(
         base_url=ollama_url,
         temperature=0,
     ).with_structured_output(ThresholdAdjustment).with_retry(
-        retry_exception_types=(ValidationError, Exception),
-        max_attempt_number=3,
-        wait_exponential_jitter=True
+        retry_if_exception_type=(ValidationError, Exception),
+        stop_after_attempt=3,
+        wait_exponential_jitter=True,
     )
 
     metrics = state.get("metrics") or {}

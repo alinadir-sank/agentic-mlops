@@ -33,3 +33,5 @@ pandas
 
 # for streamlit dashboards
 streamlit
+
+databricks-sdk

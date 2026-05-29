@@ -90,18 +90,27 @@ def _get_thresholds(model_id: str, rag: RAGStore) -> dict:
     return _default_thresholds()
 
 def _build_severity_llm() -> Any:
+    from tenacity import retry_if_exception_type
     model_name = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
     ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    return ChatOllama(
-        model=model_name, base_url=ollama_url, temperature=0
-    ).with_structured_output(SeverityClassification).with_retry(
-        retry_exception_types=(ValidationError, Exception),
-        max_attempt_number=3,
-        wait_exponential_jitter=True
+
+    return (
+        ChatOllama(
+            model=model_name,
+            base_url=ollama_url,
+            temperature=0
+        )
+        .with_structured_output(SeverityClassification)
+        .with_retry(
+            retry_if_exception_type=retry_if_exception_type(
+                (ValidationError, Exception)
+            ),
+            stop_after_attempt=3,
+        )
     )
 
 def monitor_agent(state: AgentState, rag: RAGStore) -> AgentState:
-    model_id = state.get("model_id", os.getenv("DEFAULT_MODEL_ID", "main.default.fraud_classifier_v1"))
+    model_id = "main.default.fraud_classifier_v1"
     environment = state.get("environment", os.getenv("DEFAULT_ENVIRONMENT", "production"))
     model_version = state.get("model_version", os.getenv("DEFAULT_MODEL_VERSION", "1"))
     
@@ -109,7 +118,11 @@ def monitor_agent(state: AgentState, rag: RAGStore) -> AgentState:
         raise ValueError("state['model_id'] is a missing dependency context.")
 
     # Explicitly configure backend connection URI before client initialization
-    mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI"))
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
+    token        = os.getenv("MLFLOW_TRACKING_TOKEN", "")
+    os.environ["MLFLOW_TRACKING_TOKEN"] = token
+    mlflow.set_tracking_uri(tracking_uri)
+    mlflow.set_registry_uri("databricks-uc")
     client = MlflowClient()
 
     # 1. Resolve the active champion version identifier first (The Source of Truth)
