@@ -180,8 +180,13 @@ async def _execute_pipeline(thread_id: str, model_id: str, environment: str):
             # Persist to ChromaDB after each update
             rag.save_run(thread_id, runs[thread_id])
 
-        runs[thread_id]["status"]       = "completed"
-        runs[thread_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
+        # Check if paused at human approval (node interruption doesn't raise exception)
+        if runs[thread_id].get("current_agent") == "human_approval" and runs[thread_id].get("human_approved") is None:
+            runs[thread_id]["status"] = "awaiting_approval"
+            logger.info("Pipeline paused at human approval — thread %s", thread_id)
+        else:
+            runs[thread_id]["status"]       = "completed"
+            runs[thread_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
         rag.save_run(thread_id, runs[thread_id])
 
     except Exception as exc:

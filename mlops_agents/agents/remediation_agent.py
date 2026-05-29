@@ -77,6 +77,9 @@ def remediation_agent(state: AgentState) -> AgentState:
 
         elif action == "scale_infrastructure":
             result = scale_deployment(model_id=model_id, environment=environment)
+
+        elif action == "rollback":
+            result = rollback_deployment(model_id=model_id, environment=environment)
             
         elif action == "none":
             result = {"status": "skipped", "detail": "Diagnosis requested no remediation actions. System state within normal bounds."}

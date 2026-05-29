@@ -44,7 +44,6 @@ class SeverityClassification(BaseModel):
     @field_validator("confidence", mode="before")
     @classmethod
     def clamp_confidence(cls, v: Any) -> float:
-        print(f"confidence data type: {type(v)}")
         try: return max(0.0, min(1.0, float(v)))
         except (TypeError, ValueError): return 0.5
 
@@ -158,6 +157,10 @@ def monitor_agent(state: AgentState, rag: RAGStore) -> AgentState:
 
     thresholds = _get_thresholds(model_id, rag)
     trend = rag.query_recent_metrics(model_id=model_id, n_results=10, environment=environment)
+    
+    # If no historical trend yet, note it for the LLM
+    has_trend = bool(trend) and len(trend) > 0
+    trend_context = f"Historical trend (last {len(trend)} runs): {json.dumps(trend[:3])}" if has_trend else "Historical trend: NOT AVAILABLE (first run or no prior metrics)"
 
     # Agent reasoning prompt replacing structural hardcoded if-else statements
     prompt = f"""You are an autonomous MLOps monitor. Evaluate production metrics against alert thresholds and classify severity.
@@ -175,11 +178,30 @@ SEVERITY DECISION LOGIC:
 CURRENT CONTEXT:
 Metrics snapshot: {json.dumps(metrics)}
 Alert thresholds: {json.dumps(thresholds)}
-Historical trend (last 3 runs): {json.dumps(trend[:3])}
+{trend_context}
 
-TASK: Compare each metric against its thresholds. If accuracy < critical threshold, classify as CRITICAL. 
-If any major threshold breached, classify as MAJOR. Check historical trend for sustained degradation (minor).
-Output severity, confidence (0.0-1.0), and reasoning."""
+TASK: Compare each metric against its thresholds and classify severity.
+
+SPECIAL CASE - NO HISTORICAL TREND:
+If trend data is unavailable (first run), classify based ONLY on current metrics vs thresholds:
+- Still use CRITICAL/MAJOR/NONE based on threshold breaches
+- Do NOT classify as "minor" without trend data to show degradation
+- If all metrics within bounds and no trend available, classify as "none"
+
+REASONING FORMAT REQUIREMENTS:
+1. For EACH threshold breach found, include:
+   - Metric name and current value
+   - Threshold value breached
+   - Whether current < threshold (for performance metrics) OR current > threshold (for risk/latency metrics)
+   - Reference to historical trend if available (e.g., "was 0.75 last run, now 0.68")
+
+2. Examples of well-grounded reasoning:
+   - "CRITICAL: accuracy is 0.62, below critical threshold 0.65 (degraded from 0.75 three runs ago)"
+   - "MAJOR: error_rate 0.08 exceeds major threshold 0.05; combined with latency_ms 1200 > 1000, two major breaches"
+   - "MINOR: fraud_rate 0.045 within bounds (< 0.05), but declined 2% vs week-over-week trend"
+   - "NONE: All metrics nominal — accuracy 0.88, error_rate 0.02, latency_ms 450"
+
+3. Output severity, confidence (0.0-1.0), and reasoning that explicitly states metric names, current values, and thresholds."""
 
     print(f"[Monitor Agent] Prompt: {prompt}")
 

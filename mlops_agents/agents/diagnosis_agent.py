@@ -211,6 +211,12 @@ Mapped Execution Runbooks & Post-Mortems:
 Recent Telemetry History Trend Line:
 {_format_trend(trend)}
 
+NOTE: The possible actions you can recommend are strictly limited to the following:
+- "retrain": The model shows signs of concept or data drift. Recommend a retraining with a prescription for data selection and retraining parameters.
+- "scale": The model itself is sound but is experiencing infrastructure-related performance bottlenecks. Recommend scaling up resources or optimizing deployment.
+- "rollback": A recent model update introduced instability. Recommend rolling back to the last known good model version.
+- "investigate": The root cause is unclear or doesn't fit known patterns. Recommend a manual investigation by the engineering team.
+
 Instructions: Formulate a cohesive root cause evaluation by contrasting data histograms against baseline shapes and historical runbooks. Output strictly via the required JSON target model configuration layout."""
 
     llm = _build_diagnosis_llm()

@@ -664,9 +664,14 @@ class RAGStore:
         )
 
         # Upsert — overwrite if thread_id already exists
+        searchable_text = (
+            run_data.get("diagnosis") 
+            or run_data.get("status") 
+            or ""
+        )
         self._runs.upsert(
             ids=[thread_id],
-            documents=[run_data.get("diagnosis", run_data.get("status", ""))],  # Searchable text
+            documents=[searchable_text],  # Searchable text (always a string)
             metadatas=[metadata],
         )
         logger.info("Persisted run %s (status=%s)", thread_id, run_data.get("status"))
