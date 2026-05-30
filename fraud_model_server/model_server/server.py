@@ -1,0 +1,643 @@
+"""
+server.py — FastAPI inference server + MCP server for the fraud classifier.
+
+Option B: all inference-time drift injection removed. The server is now a
+pure prediction + monitoring service. Drift is introduced at the data layer
+(dataset_generator.py creates drifted CSVs; transaction_generator.py replays
+them). The model predicts on genuinely shifted features — retrain has a real
+effect.
+
+Retained:
+  - /predict, /predict/batch
+  - hot-reload watcher (MLflow retrained model detection)
+  - get_current_metrics, get_prediction_history, predict_fraud, get_model_info
+  - reset_reference MCP tool
+
+Removed:
+  - state["drift_config"] and state["drift_factor"]
+  - apply_data_drift()
+  - apply_concept_drift()
+  - _feature_index() helper
+  - inject_drift MCP tool
+  - get_drift_status MCP tool
+  - simulate_drift MCP tool
+  - all drift application logic in transaction_to_features()
+"""
+
+import os
+import json
+import time
+import uuid
+import threading
+import numpy as np
+import joblib
+import mlflow
+import mlflow.sklearn
+from pathlib import Path
+from datetime import datetime, timezone, timedelta
+from collections import deque
+from contextlib import asynccontextmanager
+from typing import Any
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+
+from mlflow.tracking import MlflowClient
+
+import tempfile
+
+from dotenv import load_dotenv
+load_dotenv()
+
+# ── config ────────────────────────────────────────────────────────────────────
+MODEL_DIR    = Path(os.getenv("MODEL_DIR", "./model"))
+MODEL_PATH   = MODEL_DIR / "fraud_classifier.joblib"
+AMOUNT_SCALER_PATH = MODEL_DIR / "amount_scaler.joblib"
+TIME_SCALER_PATH   = MODEL_DIR / "time_scaler.joblib"
+META_PATH    = MODEL_DIR / "metadata.json"
+
+MLFLOW_URI   = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
+MODEL_ID     = os.getenv("MODEL_ID", "fraud-classifier-v1")
+ENVIRONMENT  = os.getenv("ENVIRONMENT", "production")
+EXPERIMENT   = os.getenv("MLFLOW_EXPERIMENT_NAME", "/Shared/production-model-evals")
+RELOAD_CHECK = int(os.getenv("RELOAD_CHECK_INTERVAL", "60"))
+HISTORY_SIZE = int(os.getenv("PREDICTION_HISTORY_SIZE", "1000"))
+
+# ── shared state ──────────────────────────────────────────────────────────────
+state: dict[str, Any] = {
+    "model":         None,
+    "amount_scaler": None,
+    "time_scaler":   None,
+    "loaded_run_id": None,
+    "last_mlflow_metric_log": datetime.min.replace(tzinfo=timezone.utc),
+    "model_name": MODEL_ID,
+    "model_version": os.getenv("MLFLOW_MODEL_VERSION", "1"),
+
+
+    # ── NEW: Required by the telemetry worker to resolve active version tags ──
+    "metadata": {
+        "feature_cols":  [f"V{i}" for i in range(1, 29)] + ["Amount_scaled", "Time_scaled"]
+    },
+
+    "prediction_history": deque(maxlen=5000),
+    "feature_history":    deque(maxlen=5000),
+
+    "stats": {
+        "total_predictions": 0,
+        "fraud_detected":    0,
+        "errors":            0,
+        "latencies_ms":      deque(maxlen=200),
+    },
+
+}
+
+state_lock = threading.Lock()
+
+def mlflow_telemetry_worker():
+    """
+    Asynchronous daemon loop. Periodically checks MLflow for the active champion model version,
+    transforms feature history into 12-bin structures, and writes to that version's tags.
+    """
+    mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI"))
+    mlflow.set_registry_uri("databricks-uc")
+    client = MlflowClient()
+    
+    while True:
+
+        print(f"[Telemetry Worker] Updating production feature distributions in MLflow...")
+        
+        with state_lock:
+            feature_history = list(state["feature_history"])
+            metadata        = state["metadata"]
+            
+        feature_cols = metadata.get("feature_cols", [])
+        model_name   = state.get("model_name")
+        print(f"[Telemetry Worker] Model name from state: {model_name}")
+
+        active_run_id = None
+        
+        # 1. NEW: Poll MLflow to find out what the active version integer is right now
+        try:
+            alias_metadata = client.get_model_version_by_alias(name=model_name, alias="champion")
+            active_version = alias_metadata.version  # Captures new versions automatically
+            active_run_id = alias_metadata.run_id
+            # Sync back to shared server state metadata block
+            with state_lock:
+                state["model_version"] = active_version
+            print(f"[Telemetry Worker] updated state to active version: {state["model_version"]}")
+        except Exception as exc:
+            print(f"[Telemetry Worker Warning] Could not resolve 'champion' alias, using last known: {exc}")
+            active_version = state.get("model_version", "1")
+    
+        if len(feature_history) < 50:
+            # Check and update telemetry distributions every 60 seconds
+            time.sleep(15)
+            continue 
+        
+        # 2. Calculate distributions using optimized bin sizes
+        arr = np.array(feature_history)
+        production_histograms = {}
+
+        for i, col in enumerate(feature_cols):
+            counts, bin_edges = np.histogram(arr[:, i], bins=12)
+            production_histograms[col] = {
+                "counts":     counts.tolist(),
+                "bin_edges":  bin_edges.tolist(),
+                "mean":       float(arr[:, i].mean()),
+                "std":        float(arr[:, i].std()),
+            }
+
+        # 3. Asynchronously push to the dynamically resolved model registry version tags
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                artifact_path = Path(tmpdir) / "latest_production_histogram.json"
+                artifact_path.write_text(json.dumps(production_histograms))
+
+                with mlflow.start_run(run_id=active_run_id):
+                    mlflow.log_artifact(str(artifact_path))
+                    # optional: keep a small pointer on the model version
+                    client.set_model_version_tag(
+                        name=model_name,
+                        version=active_version,
+                        key="latest_production_histogram_run_id",
+                        value=mlflow.active_run().info.run_id,
+                    )
+        except Exception as exc:
+            print(f"[Telemetry Worker Error] Failed to upload metrics to version {active_version}: {exc}")
+
+        print(f"[Telemetry Worker] Updated production feature distributions for version {active_version} with {len(feature_history)} samples.")
+
+
+        # Check and update telemetry distributions every 60 seconds
+        time.sleep(60)
+
+# Start the background task immediately on startup
+threading.Thread(target=mlflow_telemetry_worker, daemon=True).start()
+
+# ── model loading ─────────────────────────────────────────────────────────────
+
+def load_model_from_disk():
+    if not MODEL_PATH.exists():
+        raise FileNotFoundError(
+            f"No model found at {MODEL_PATH}. Run scripts/train.py first."
+        )
+    model    = joblib.load(MODEL_PATH)
+    amount_scaler = joblib.load(AMOUNT_SCALER_PATH)
+    time_scaler   = joblib.load(TIME_SCALER_PATH)
+    metadata = json.loads(META_PATH.read_text())
+    return model, amount_scaler, time_scaler, metadata
+
+
+def watch_for_retrain():
+    """Background thread — polls MLflow for a model tagged triggered_by=remediation_agent."""
+    token = os.getenv("MLFLOW_TRACKING_TOKEN", "")
+    if token:
+        os.environ["MLFLOW_TRACKING_TOKEN"] = token
+    mlflow.set_tracking_uri(MLFLOW_URI)
+
+    while True:
+        time.sleep(RELOAD_CHECK)
+        try:
+            client     = MlflowClient()
+            experiment = client.get_experiment_by_name(EXPERIMENT)
+            if not experiment:
+                continue
+
+            runs = client.search_runs(
+                experiment_ids=[experiment.experiment_id],
+                filter_string=(
+                    f"tags.triggered_by IN ('remediation_agent','manual') and tags.model_id = '{MODEL_ID}'"
+                ),
+                order_by=["start_time DESC"],
+                max_results=1,
+            )
+            if not runs:
+                continue
+
+            latest        = runs[0]
+            latest_run_id = latest.info.run_id
+
+            with state_lock:
+                if latest_run_id == state["loaded_run_id"]:
+                    continue
+
+                print(f"\n[watcher] new retrained model — run {latest_run_id}")
+                new_model = mlflow.sklearn.load_model(f"runs:/{latest_run_id}/model")
+                metadata = state["metadata"]
+                try:
+                    tmpdir = tempfile.mkdtemp()
+                    client.download_artifacts(latest_run_id, "metadata.json", tmpdir)
+                    metadata_path = Path(tmpdir) / "metadata.json"
+                    metadata = json.loads(metadata_path.read_text())
+                except Exception as e:
+                    print(f"[watcher] warning: failed to download metadata.json for run {latest_run_id}, using existing metadata")
+                    print(f"[watcher] error: {e}")
+
+                state["model"]           = new_model
+                state["loaded_run_id"]   = latest_run_id
+                state["metadata"] = metadata
+                print(f"[watcher] model hot-reloaded.\n")
+
+        except Exception as e:
+            print(f"[watcher] error: {e}")
+
+# ── lifespan ──────────────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    token = os.getenv("MLFLOW_TRACKING_TOKEN", "")
+    if token:
+        os.environ["MLFLOW_TRACKING_TOKEN"] = token
+
+    model, amount_scaler, time_scaler, metadata = load_model_from_disk()
+    with state_lock:
+        state["model"] = model
+        state["amount_scaler"] = amount_scaler
+        state["time_scaler"] = time_scaler
+        state["metadata"] = metadata
+        state["loaded_run_id"] = state.get("loaded_run_id")
+        state["last_mlflow_metric_log"] = state.get(
+            "last_mlflow_metric_log",
+            datetime.min.replace(tzinfo=timezone.utc),
+        )
+
+    print(f"Loaded model  : {metadata['model_type']}")
+    print(f"Train samples : {metadata['train_samples']}")
+    print(f"Trained at    : {metadata['trained_at']}")
+
+    t = threading.Thread(target=watch_for_retrain, daemon=True)
+    t.start()
+    print(f"[watcher] polling MLflow every {RELOAD_CHECK}s for retrained model\n")
+
+    yield
+    print("Server shutting down.")
+
+
+app = FastAPI(
+    title="Fraud Classifier MCP Server",
+    description="Credit card fraud inference + MCP tool interface for mlops_agents",
+    version="2.0.0",
+    lifespan=lifespan,
+)
+
+# ── pydantic models ───────────────────────────────────────────────────────────
+
+class Transaction(BaseModel):
+    v1: float;  v2: float;  v3: float;  v4: float;  v5: float
+    v6: float;  v7: float;  v8: float;  v9: float;  v10: float
+    v11: float; v12: float; v13: float; v14: float; v15: float
+    v16: float; v17: float; v18: float; v19: float; v20: float
+    v21: float; v22: float; v23: float; v24: float; v25: float
+    v26: float; v27: float; v28: float
+    amount: float = Field(..., ge=0)
+    time:   float = Field(..., ge=0)
+
+class MCPCallRequest(BaseModel):
+    tool:   str
+    params: dict = {}
+
+# ── feature extraction ────────────────────────────────────────────────────────
+
+def transaction_to_features(tx: Transaction) -> np.ndarray:
+    """
+    Pure feature extraction and scaling. No drift application — drift is
+    introduced at the data layer via drifted dataset CSVs, not at inference time.
+    """
+    with state_lock:
+        amount_scaler = state["amount_scaler"]
+        time_scaler   = state["time_scaler"]
+
+    raw = np.array([[
+        tx.v1,  tx.v2,  tx.v3,  tx.v4,  tx.v5,
+        tx.v6,  tx.v7,  tx.v8,  tx.v9,  tx.v10,
+        tx.v11, tx.v12, tx.v13, tx.v14, tx.v15,
+        tx.v16, tx.v17, tx.v18, tx.v19, tx.v20,
+        tx.v21, tx.v22, tx.v23, tx.v24, tx.v25,
+        tx.v26, tx.v27, tx.v28,
+        tx.amount, tx.time,
+    ]])
+
+    raw[0, 28] = amount_scaler.transform([[tx.amount]])[0][0]
+    raw[0, 29] = time_scaler.transform([[tx.time]])[0][0]
+
+    return raw
+
+
+def run_inference(features: np.ndarray) -> dict:
+    with state_lock:
+        model = state["model"]
+        threshold = state.get("metadata", {}).get("optimal_threshold", 0.5)
+
+    start   = time.perf_counter()
+    proba   = model.predict_proba(features)[0]
+    pred    = 1 if proba[1] >= threshold else 0
+    latency = (time.perf_counter() - start) * 1000
+
+    return {
+        "prediction": pred,
+        "fraud_prob": round(float(proba[1]), 4),
+        "legit_prob": round(float(proba[0]), 4),
+        "latency_ms": round(latency, 3),
+    }
+
+
+def compute_current_metrics() -> dict:
+    with state_lock:
+        history  = list(state["prediction_history"])
+        stats    = dict(state["stats"])
+        metadata = state["metadata"]
+
+    base = metadata["metrics"]
+    total_predictions = stats["total_predictions"]
+
+    error_rate = round(
+        stats["errors"] / max(total_predictions, 1), 4
+    )
+
+    # ── fallback when no history yet ─────────────────────────────────────────
+    if not history:
+        return {
+            "fraud_rate":  0.0,
+            "latency_ms":  0.0,
+            "error_rate":  error_rate,   # real — from serving stats even at zero
+            "sample_size": 0,
+            "precision":   base.get("precision", 0.0),
+            "recall":      base.get("recall", 0.0),
+            "f1":          base.get("f1", 0.0),
+            "roc_auc":     base.get("roc_auc", 0.0),
+            "accuracy":    base.get("accuracy", 0.0),
+        }
+
+    # ── live computation ──────────────────────────────────────────────────────
+    high_conf = sum(
+        1 for h in history
+        if h["fraud_prob"] > 0.7 or h["fraud_prob"] < 0.3
+    )
+    accuracy   = round(high_conf / len(history), 4)
+    fraud_rate = round(
+        sum(1 for h in history if h["prediction"] == 1) / len(history), 4
+    )
+
+    latencies   = list(stats["latencies_ms"])
+    p95_latency = (
+        round(float(np.percentile(latencies, 95)), 2)
+        if latencies else 0.0
+    )
+
+    return {
+        "fraud_rate":  fraud_rate,
+        "latency_ms":  p95_latency,
+        "error_rate":  error_rate,
+        "sample_size": len(history),
+        "precision":   base.get("precision", 0.0),
+        "recall":      base.get("recall", 0.0),
+        "f1":          base.get("f1", 0.0),
+        "roc_auc":     base.get("roc_auc", 0.0),
+        "accuracy":    accuracy,
+    }
+
+# ── inference endpoints ───────────────────────────────────────────────────────
+
+@app.post("/predict")
+async def predict(tx: Transaction):
+    try:
+        features = transaction_to_features(tx)
+        result   = run_inference(features)
+        tx_id    = str(uuid.uuid4())
+
+        record = {
+            "transaction_id": tx_id,
+            "timestamp":      datetime.now(timezone.utc).isoformat(),
+            **result,
+        }
+
+        with state_lock:
+            state["prediction_history"].append(record)
+            state["feature_history"].append(features[0].tolist())
+            state["stats"]["total_predictions"] += 1
+            state["stats"]["latencies_ms"].append(result["latency_ms"])
+            if result["prediction"] == 1:
+                state["stats"]["fraud_detected"] += 1
+
+        return record
+
+    except Exception as e:
+        with state_lock:
+            state["stats"]["errors"] += 1
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/predict/batch")
+async def predict_batch(transactions: list[Transaction]):
+    start_time = time.perf_counter()
+    
+    # 1. Vectorize the incoming batch payload
+    features_matrix = np.array([tx.features for tx in transactions])
+    batch_size = features_matrix.shape[0]
+    
+    # 2. Critical State Updates & Inference (Combined under one lock pass)
+    with state_lock:
+        model = state["model"]
+        threshold = state.get("optimal_threshold", 0.5)
+        
+        # FIX: Feed the batch data directly into your telemetry pipeline!
+        # Convert the NumPy matrix to a list of lists so deque handles it seamlessly
+        state["feature_history"].extend(features_matrix.tolist())
+
+    # 3. Fast matrix prediction
+    probas = model.predict_proba(features_matrix)
+    fraud_probs = probas[:, 1]
+    predictions = (fraud_probs >= threshold).astype(int)
+    
+    # 4. Format response payload
+    latency_ms = (time.perf_counter() - start_time) * 1000
+    response = []
+    for i in range(batch_size):
+        response.append({
+            "prediction": int(predictions[i]),
+            "fraud_prob": round(float(fraud_probs[i]), 4),
+            "latency_batch_ms": round(latency_ms / batch_size, 3)
+        })
+        
+    return response
+
+
+@app.get("/metrics")
+async def metrics():
+    return compute_current_metrics()
+
+
+@app.get("/model/info")
+async def model_info():
+    with state_lock:
+        meta       = state["metadata"]
+        run_id     = state["loaded_run_id"]
+        stats      = dict(state["stats"])
+
+    return {
+        "model_id":      MODEL_ID,
+        "environment":   ENVIRONMENT,
+        "model_type":    meta["model_type"],
+        "trained_at":    meta["trained_at"],
+        "train_samples": meta["train_samples"],
+        "full_train":    meta["full_train"],
+        "triggered_by":  meta["triggered_by"],
+        "loaded_run_id": run_id,
+        "runtime_stats": {
+            "total_predictions": stats["total_predictions"],
+            "fraud_detected":    stats["fraud_detected"],
+            "errors":            stats["errors"],
+        },
+    }
+
+
+@app.get("/health")
+async def health():
+    with state_lock:
+        model_loaded = state["model"] is not None
+    return {
+        "status":          "ok" if model_loaded else "degraded",
+        "model_loaded":    model_loaded,
+        "model_id":        MODEL_ID,
+        "environment":     ENVIRONMENT,
+        "timestamp":       datetime.now(timezone.utc).isoformat(),
+    }
+
+# ── MCP manifest ──────────────────────────────────────────────────────────────
+
+MCP_MANIFEST = {
+    "schema_version": "v1",
+    "name":           "fraud-classifier",
+    "description":    "Credit card fraud classifier with monitoring tools",
+    "tools": [
+        {
+            "name":        "predict_fraud",
+            "description": "Run fraud inference on a single credit card transaction.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "transaction": {
+                        "type":        "object",
+                        "description": "Transaction features (V1-V28, amount, time)",
+                    }
+                },
+                "required": ["transaction"],
+            },
+        },
+        {
+            "name":        "get_current_metrics",
+            "description": (
+                "Get live runtime and operational metrics including latency, fraud rate, error rate, and evaluation metrics."
+                "Also logs a snapshot to MLflow tagged run_type=metrics_snapshot."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+        {
+            "name":        "get_prediction_history",
+            "description": "Retrieve the last N predictions with fraud probabilities and latencies.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "n": {"type": "integer", "default": 50}
+                },
+            },
+        },
+        {
+            "name":        "get_model_info",
+            "description": "Get model metadata, reference window status, and runtime stats.",
+            "parameters":  {"type": "object", "properties": {}},
+        },
+    ],
+}
+
+
+@app.get("/mcp")
+async def mcp_manifest():
+    return MCP_MANIFEST
+
+# ── MCP tool execution ────────────────────────────────────────────────────────
+
+@app.post("/mcp/call")
+async def mcp_call(req: MCPCallRequest):
+    tool   = req.tool
+    params = req.params
+
+    if tool == "predict_fraud":
+        tx_data = params.get("transaction", {})
+        try:
+            tx = Transaction(**{k.lower(): v for k, v in tx_data.items()})
+        except Exception as e:
+            raise HTTPException(400, f"Invalid transaction: {e}")
+        return await predict(tx)
+
+    elif tool == "get_current_metrics":
+        token = os.getenv("MLFLOW_TRACKING_TOKEN", "")
+        if token:
+            os.environ["MLFLOW_TRACKING_TOKEN"] = token
+        mlflow.set_tracking_uri(MLFLOW_URI)
+        mlflow.set_experiment(EXPERIMENT)
+
+        metrics_data = compute_current_metrics()
+
+        now = datetime.now(timezone.utc)
+        time_elapsed = None
+
+        with state_lock:
+            last_log_time = state["last_mlflow_metric_log"]
+            active_version = state.get("model_version", "1")
+            time_elapsed = now - last_log_time
+
+        if time_elapsed < timedelta(minutes=1):
+            print(f"[Mlflow Snapshot] Skipping log to MLflow (last log was {time_elapsed.seconds}s ago)")
+            with state_lock:
+                state["last_mlflow_metric_log"] = now
+            return metrics_data
+
+        try:
+            # 1. Resolve what version this server is currently serving out of state
+            with state_lock:
+                active_version = state.get("model_version", "1")
+
+            with mlflow.start_run(run_name=f"{MODEL_ID}-metrics-snapshot"):
+                for k, v in metrics_data.items():
+                    if isinstance(v, (int, float)):
+                        mlflow.log_metric(k, v)
+                mlflow.set_tag("model_id",    MODEL_ID)
+                mlflow.set_tag("environment", ENVIRONMENT)
+                mlflow.set_tag("run_type",    "metrics_snapshot")
+                mlflow.set_tag("triggered_by", "mcp_tool")
+                # NEW ALIGNMENT TAG: Bind this tracking run to the registry version scale
+                mlflow.set_tag("model_version", str(active_version))
+        except Exception as e:
+            print(f"[mlflow] snapshot log failed (non-fatal): {e}")
+
+        print(f"[Mlflow Snapshot] Logged current metrics snapshot for version {active_version}: {metrics_data}")
+
+        return metrics_data
+
+    elif tool == "get_prediction_history":
+        n = int(params.get("n", 50))
+        with state_lock:
+            history = list(state["prediction_history"])[-n:]
+        return {"count": len(history), "predictions": history}
+
+    elif tool == "get_model_info":
+        return await model_info()
+
+    else:
+        raise HTTPException(
+            400,
+            f"Unknown tool: '{tool}'. Available: {[t['name'] for t in MCP_MANIFEST['tools']]}",
+        )
+
+# ── entry point ───────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "server:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "8080")),
+        reload=False,
+        log_level="info",
+    )
