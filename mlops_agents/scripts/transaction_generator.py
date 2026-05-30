@@ -117,14 +117,9 @@ def load_rows(csv_path: Path, n: int = 500) -> tuple[list[dict], pd.DataFrame]:
     """
     df = pd.read_csv(csv_path)
 
-    fraud = df[df["Class"] == 1].sample(
-        min(len(df[df["Class"] == 1]), n // 6), random_state=42
-    )
-    legit = df[df["Class"] == 0].sample(n - len(fraud), random_state=42)
     sample = (
-        pd.concat([fraud, legit])
-        .sample(frac=1, random_state=42)
-        .reset_index(drop=True)
+    df.sample(n=n, random_state=42)
+      .reset_index(drop=True)
     )
 
     rows = []

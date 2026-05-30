@@ -174,7 +174,7 @@ def diagnosis_agent(state: AgentState, rag: RAGStore) -> AgentState:
     # Build context lookup keys for RAG spaces
     query_text = (
         f"Model {model_id} in {environment}. Severity: {severity}. "
-        f"Accuracy: {metrics.get('accuracy')}. Drift score: {metrics.get('drift_score')}."
+        f"Accuracy: {metrics.get('accuracy')}."
     )
 
     # Execute RAG Retrieval
@@ -216,6 +216,10 @@ NOTE: The possible actions you can recommend are strictly limited to the followi
 - "scale": The model itself is sound but is experiencing infrastructure-related performance bottlenecks. Recommend scaling up resources or optimizing deployment.
 - "rollback": A recent model update introduced instability. Recommend rolling back to the last known good model version.
 - "investigate": The root cause is unclear or doesn't fit known patterns. Recommend a manual investigation by the engineering team.
+
+- Confidence: should be between 0.0 and 1.0
+- Root Cause Categories: concept_drift | data_drift | model_staleness | infrastructure | data_quality | unknown
+- Retrain Prescription: Only include if recommending "retrain". Should specify data strategy, window size, drifted features, and optimization targets.
 
 Instructions: Formulate a cohesive root cause evaluation by contrasting data histograms against baseline shapes and historical runbooks. Output strictly via the required JSON target model configuration layout."""
 
