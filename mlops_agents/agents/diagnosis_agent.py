@@ -239,6 +239,8 @@ Instructions: Formulate a cohesive root cause evaluation by contrasting data his
             "remediation_action": "investigate"
         }
 
+    print(f"[Diagnosis Agent] LLM Structured Output: {result.model_dump_json()}")
+
     # Materialize prescription parameters for safe hand-off to remediation agent tools
     prescription = result.retrain_prescription.model_dump(
     ) if result.retrain_prescription else None
