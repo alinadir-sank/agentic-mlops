@@ -1,0 +1,200 @@
+# .github/workflows/retrain.yml
+name: Retrain Fraud Classifier
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_id:
+        required: true
+        default: "main.default.fraud_classifier_v1"
+      environment:
+        required: true
+        default: "production"
+      severity:
+        required: false
+        default: "unknown"
+      reason:
+        required: false
+        default: "manual trigger"
+      triggered_by:
+        required: false
+        default: "manual"
+
+      # data prescription
+      data_strategy:
+        required: false
+        default: "recent_window"
+      window_days:
+        required: false
+        default: "30"
+      drift_period_weight:
+        required: false
+        default: "1.5"
+      exclude_before:
+        required: false
+        default: ""
+      refit_preprocessors:
+        required: false
+        default: "true"
+      drifted_features:
+        required: false
+        default: "[]"
+
+      # model / threshold prescription
+      optimize_for:
+        required: false
+        default: "recall"
+      target_recall:
+        required: false
+        default: "0.80"
+      target_roc_auc:
+        required: false
+        default: "0.88"
+
+      # deployment prescription
+      deployment_strategy:
+        required: false
+        default: "canary"
+      canary_traffic_pct:
+        required: false
+        default: "10"
+      shadow_period_hours:
+        required: false
+        default: "2"
+
+      drift_dataset:
+        description: "Dataset name to train on (leave empty for full Kaggle CSV)"
+        required: false
+        default: "baseline"
+
+# Add this block right here:
+permissions:
+  contents: read # Gives GITHUB_TOKEN permission to read releases and code
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout Code 
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          
+        # 2. Intercept and cache the local directory where release files will live
+      - name: Cache GitHub Release Assets
+        uses: actions/cache@v4
+        id: release-cache
+        with:
+          path: model_server/data/datasets
+          # Hardcode a version key; update it manually if you ever upload a new release
+          key: ${{ runner.os }}-release-v1.0.0 
+      
+      # 3. Only run the download script if the cache key WAS NOT found (cache-hit is false)
+      - name: Download Release Assets on Cache Miss
+        if: steps.release-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Needed to authenticate the gh tool
+        run: |
+          # Downloads all assets from your specified tag directly into the folder
+          gh release download 1.0.0 --skip-existing --dir model_server/data/datasets --repo ${{ github.repository }}
+ 
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('model_server/requirements.txt') }}
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r model_server/requirements.txt
+
+      - name: Log trigger context
+        run: |
+          echo "Model ID   : ${{ github.event.inputs.model_id }}"
+          echo "Environment: ${{ github.event.inputs.environment }}"
+          echo "Severity   : ${{ github.event.inputs.severity }}"
+          echo "Reason     : ${{ github.event.inputs.reason }}"
+
+      - name: Run full retrain
+        env:
+          MLFLOW_TRACKING_URI:   ${{ secrets.MLFLOW_TRACKING_URI }}
+          MLFLOW_TRACKING_TOKEN: ${{ secrets.MLFLOW_TRACKING_TOKEN }}
+          MLFLOW_EXPERIMENT_NAME: ${{ secrets.MLFLOW_EXPERIMENT_NAME }}
+          DATABRICKS_HOST:       ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN:      ${{ secrets.DATABRICKS_TOKEN }}
+          MODEL_ID:              ${{ github.event.inputs.model_id }}
+          ENVIRONMENT:           ${{ github.event.inputs.environment }}
+          TRIGGERED_BY:          ${{ github.event.inputs.triggered_by }}
+          DRIFT_DATASET:         ${{ github.event.inputs.drift_dataset }}
+          FULL_TRAIN:            "true"
+
+          # prescription — train.py reads these
+          DATA_STRATEGY:         ${{ github.event.inputs.data_strategy }}
+          WINDOW_DAYS:           ${{ github.event.inputs.window_days }}
+          DRIFT_PERIOD_WEIGHT:   ${{ github.event.inputs.drift_period_weight }}
+          EXCLUDE_BEFORE:        ${{ github.event.inputs.exclude_before }}
+          REFIT_PREPROCESSORS:   ${{ github.event.inputs.refit_preprocessors }}
+          DRIFTED_FEATURES:      ${{ github.event.inputs.drifted_features }}
+          OPTIMIZE_FOR:          ${{ github.event.inputs.optimize_for }}
+          TARGET_RECALL:         ${{ github.event.inputs.target_recall }}
+          TARGET_ROC_AUC:        ${{ github.event.inputs.target_roc_auc }}
+          DEPLOYMENT_STRATEGY:   ${{ github.event.inputs.deployment_strategy }}
+        run: |
+          cd model_server
+          python scripts/train.py
+
+      - name: Validate retrained model metrics
+        env:
+          MLFLOW_TRACKING_URI:   ${{ secrets.MLFLOW_TRACKING_URI }}
+          MLFLOW_TRACKING_TOKEN: ${{ secrets.MLFLOW_TRACKING_TOKEN }}
+          MLFLOW_EXPERIMENT_NAME: ${{ secrets.MLFLOW_EXPERIMENT_NAME }}
+          MODEL_ID:              ${{ github.event.inputs.model_id }}
+        run: |
+          python - <<'EOF'
+          import mlflow, sys, os
+
+          os.environ["MLFLOW_TRACKING_TOKEN"] = os.environ["MLFLOW_TRACKING_TOKEN"]
+          os.environ["MLFLOW_EXPERIMENT_NAME"] = os.environ["MLFLOW_EXPERIMENT_NAME"]
+          mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+
+          client     = mlflow.tracking.MlflowClient()
+          experiment = client.get_experiment_by_name(os.environ["MLFLOW_EXPERIMENT_NAME"])
+
+          runs = client.search_runs(
+              experiment_ids=[experiment.experiment_id],
+              filter_string="tags.triggered_by = 'remediation_agent'",
+              order_by=["start_time DESC"],
+              max_results=1,
+          )
+
+          if not runs:
+              print("ERROR: No retrain run found")
+              sys.exit(1)
+
+          run    = runs[0]
+          roc    = run.data.metrics.get("roc_auc", 0)
+          recall = run.data.metrics.get("recall", 0)
+
+          print(f"roc_auc: {roc:.4f}  recall: {recall:.4f}")
+
+          if roc < 0.75:
+              print(f"FAIL: roc_auc {roc:.4f} below 0.75")
+              sys.exit(1)
+          if recall < 0.50:
+              print(f"FAIL: recall {recall:.4f} below 0.50")
+              sys.exit(1)
+
+          print("Validation passed.")
+          EOF
+
+      - name: Notify on failure
+        if: failure()
+        run: echo "Retrain failed — remediation agent will log this outcome."
