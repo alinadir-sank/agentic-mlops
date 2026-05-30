@@ -148,7 +148,7 @@ jobs:
           TARGET_ROC_AUC:        ${{ github.event.inputs.target_roc_auc }}
           DEPLOYMENT_STRATEGY:   ${{ github.event.inputs.deployment_strategy }}
         run: |
-          cd model_server
+          cd fraud_model_server/model_server
           python scripts/train.py
 
       - name: Validate retrained model metrics
