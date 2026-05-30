@@ -59,11 +59,6 @@ def threshold_line(val, thresholds, metric):
         if val < 0.72: return "#ffb800"
         if val < 0.80: return "#00d4ff"
         return "#00e5a0"
-    elif metric == "drift_score":
-        if val > 0.60: return "#ff4560"
-        if val > 0.35: return "#ffb800"
-        if val > 0.20: return "#00d4ff"
-        return "#00e5a0"
     elif metric == "error_rate":
         if val > 0.10: return "#ff4560"
         if val > 0.05: return "#ffb800"
@@ -118,7 +113,6 @@ m = metrics
 cols = st.columns(8)
 card_data = [
     ("Accuracy",    f"{m.get('accuracy',0):.4f}",    "accuracy"),
-    ("Drift Score", f"{m.get('drift_score',0):.4f}", "drift_score"),
     ("Latency p95", f"{m.get('latency_ms',0):.1f}ms","latency"),
     ("Error Rate",  f"{m.get('error_rate',0):.4f}",  "error_rate"),
     ("Precision",   f"{m.get('precision',0):.4f}",   None),
@@ -168,13 +162,12 @@ else:
     ])
 
     with tab1:
-        chart_df = df[["ts","accuracy","drift_score"]].set_index("ts")
+        chart_df = df[["ts","accuracy"]].set_index("ts")
         st.line_chart(chart_df, color=["#00d4ff","#ff4560"], height=220)
         st.markdown("""
         <div style="font-size:0.7rem;color:#555c72;margin-top:-8px;">
             <span style="color:#00d4ff;">■</span> accuracy &nbsp;&nbsp;
-            <span style="color:#ff4560;">■</span> drift_score
-            &nbsp;·&nbsp; thresholds: accuracy &lt;0.72=major, drift &gt;0.35=major
+            &nbsp;·&nbsp; thresholds: accuracy &lt;0.72=major
         </div>
         """, unsafe_allow_html=True)
 
