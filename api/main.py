@@ -137,116 +137,123 @@ def _build_graph():
     return build_graph(rag=rag)
 
 
+def _apply_node_output(thread_id: str, node_name: str, node_out: dict) -> None:
+    """Merge a node's output dict into the cached run record."""
+    runs[thread_id]["current_agent"] = node_name
+    for field in (
+        "severity", "diagnosis", "recommended_action", "remediation_status",
+        "incident_id", "report", "remediation_action", "remediation_detail",
+        "diagnosis_json", "retrain_prescription", "drifted_features",
+        "similar_incidents", "relevant_runbooks", "notifications_sent",
+        "human_approved",
+    ):
+        if field in node_out:
+            runs[thread_id][field] = node_out[field]
+
+    if "messages" in node_out:
+        runs[thread_id]["messages"] = [
+            m.content if hasattr(m, "content") else str(m)
+            for m in node_out["messages"]
+        ]
+
+
+async def _drive_graph(thread_id: str, stream_input, rag) -> None:
+    """
+    Drive the LangGraph stream for either an initial run or a resume.
+
+    Handles three terminal states:
+      - interrupt fired           → status="awaiting_approval", capture payload
+      - stream finished cleanly   → status="completed" (or "rejected" if user said no)
+      - exception                 → status="failed"
+    """
+    app_graph = _build_graph()
+    config = {"configurable": {"thread_id": thread_id}}
+
+    interrupt_payload = None
+    for event in app_graph.stream(stream_input, config=config):
+        # `__interrupt__` events surface payloads passed to interrupt() —
+        # they're emitted alongside regular node updates, not as a node update.
+        if "__interrupt__" in event:
+            interrupts = event["__interrupt__"]
+            if interrupts:
+                interrupt_payload = interrupts[0].value
+            continue
+
+        node_name = next(iter(event))
+        node_out = event[node_name] or {}
+        _apply_node_output(thread_id, node_name, node_out)
+        rag.save_run(thread_id, runs[thread_id])
+
+    if interrupt_payload is not None:
+        runs[thread_id]["status"] = "awaiting_approval"
+        runs[thread_id]["interrupt_payload"] = interrupt_payload
+        logger.info("Pipeline paused at human approval — thread %s", thread_id)
+    else:
+        # If the user rejected, human_approved was set to False during resume —
+        # surface that as a distinct status from a clean approve+complete.
+        if runs[thread_id].get("human_approved") is False:
+            runs[thread_id]["status"] = "rejected"
+        else:
+            runs[thread_id]["status"] = "completed"
+        runs[thread_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
+        runs[thread_id].pop("interrupt_payload", None)
+
+    rag.save_run(thread_id, runs[thread_id])
+
+
 async def _execute_pipeline(thread_id: str, model_id: str, environment: str):
     from mlops_agents.rag.store import RAGStore
     rag = RAGStore()
 
-    runs[thread_id]["status"]        = "running"
-    runs[thread_id]["started_at"]    = datetime.now(timezone.utc).isoformat()
-    runs[thread_id]["current_agent"] = "monitor"
-    rag.save_run(thread_id, runs[thread_id])
-
     try:
-        app_graph = _build_graph()
-        config    = {"configurable": {"thread_id": thread_id}}
-
-        initial_state = {
-            "model_id":    model_id,
-            "environment": environment,
-            "messages":    [],
-        }
-
-        for event in app_graph.stream(initial_state, config=config):
-            node_name = list(event.keys())[0]
-            node_out  = event[node_name] or {}
-
-            runs[thread_id]["current_agent"] = node_name
-
-            for field in [
-                "severity", "diagnosis", "recommended_action", "remediation_status",
-                "incident_id", "report", "remediation_action", "remediation_detail",
-                "diagnosis_json", "retrain_prescription", "drifted_features",
-                "similar_incidents", "relevant_runbooks", "notifications_sent",
-            ]:
-                if field in node_out:
-                    runs[thread_id][field] = node_out[field]
-
-            if "messages" in node_out:
-                runs[thread_id]["messages"] = [
-                    m.content if hasattr(m, "content") else str(m)
-                    for m in node_out["messages"]
-                ]
-
-            # Persist to ChromaDB after each update
-            rag.save_run(thread_id, runs[thread_id])
-
-        # Check if paused at human approval (node interruption doesn't raise exception)
-        if runs[thread_id].get("current_agent") == "human_approval" and runs[thread_id].get("human_approved") is None:
-            runs[thread_id]["status"] = "awaiting_approval"
-            logger.info("Pipeline paused at human approval — thread %s", thread_id)
-        else:
-            runs[thread_id]["status"]       = "completed"
-            runs[thread_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
+        runs[thread_id]["status"] = "running"
+        runs[thread_id]["started_at"] = datetime.now(timezone.utc).isoformat()
+        runs[thread_id]["current_agent"] = "monitor"
         rag.save_run(thread_id, runs[thread_id])
 
+        initial_state = {
+            "model_id": model_id,
+            "environment": environment,
+            "messages": [],
+        }
+        await _drive_graph(thread_id, initial_state, rag)
+
     except Exception as exc:
-        exc_name = type(exc).__name__
-        if "GraphInterrupt" in exc_name or "interrupt" in str(exc).lower():
-            runs[thread_id]["status"] = "awaiting_approval"
-            logger.info("Pipeline paused at human approval — thread %s", thread_id)
-        else:
-            runs[thread_id]["status"] = "failed"
-            runs[thread_id]["error"]  = str(exc)
-            logger.error("Pipeline failed for thread %s: %s", thread_id, exc)
+        runs[thread_id]["status"] = "failed"
+        runs[thread_id]["error"] = str(exc)
+        logger.error("Pipeline failed for thread %s: %s", thread_id, exc)
         rag.save_run(thread_id, runs[thread_id])
 
 
 async def _resume_pipeline(thread_id: str, approved: bool):
+    from langgraph.types import Command
     from mlops_agents.rag.store import RAGStore
     rag = RAGStore()
 
-    runs[thread_id]["status"]        = "running"
-    runs[thread_id]["current_agent"] = "remediation"
-    rag.save_run(thread_id, runs[thread_id])
-
     try:
-        app_graph    = _build_graph()
-        config       = {"configurable": {"thread_id": thread_id}}
-        resume_state = {"human_approved": approved}
+        # Self-contained fallback: repopulate cache if cold (e.g. after restart).
+        if thread_id not in runs:
+            run = rag.get_run(thread_id)
+            if not run:
+                logger.error("Resume failed — thread %s not found in memory or ChromaDB", thread_id)
+                return
+            runs[thread_id] = run
 
-        for event in app_graph.stream(resume_state, config=config):
-            node_name = list(event.keys())[0]
-            node_out  = event[node_name] or {}
-            runs[thread_id]["current_agent"] = node_name
-
-            for field in [
-                "remediation_status", "incident_id", "report", "remediation_action",
-                "remediation_detail", "diagnosis_json", "retrain_prescription",
-                "drifted_features", "similar_incidents", "relevant_runbooks",
-                "notifications_sent",
-            ]:
-                if field in node_out:
-                    runs[thread_id][field] = node_out[field]
-
-            if "messages" in node_out:
-                runs[thread_id]["messages"] = [
-                    m.content if hasattr(m, "content") else str(m)
-                    for m in node_out["messages"]
-                ]
-
-            # Persist to ChromaDB after each update
-            rag.save_run(thread_id, runs[thread_id])
-
-        runs[thread_id]["status"]         = "completed"
-        runs[thread_id]["completed_at"]   = datetime.now(timezone.utc).isoformat()
+        runs[thread_id]["status"] = "running"
         runs[thread_id]["human_approved"] = approved
         rag.save_run(thread_id, runs[thread_id])
 
+        # `Command(resume=...)` is the recommended way to resume a graph paused
+        # on `interrupt()`. The value becomes the return value of the interrupt()
+        # call inside human_approval_node.
+        await _drive_graph(thread_id, Command(resume=approved), rag)
+
     except Exception as exc:
-        runs[thread_id]["status"] = "failed"
-        runs[thread_id]["error"]  = str(exc)
+        if thread_id in runs:
+            runs[thread_id]["status"] = "failed"
+            runs[thread_id]["error"] = str(exc)
+            rag.save_run(thread_id, runs[thread_id])
         logger.error("Resume failed for thread %s: %s", thread_id, exc)
-        rag.save_run(thread_id, runs[thread_id])
 
 # ── pipeline run endpoints ────────────────────────────────────────────────────
 
@@ -585,7 +592,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "api.main:app",
         host="0.0.0.0",
-        port=int(os.getenv("API_PORT", "8000")),
+        port=8000,
         reload=True,
         log_level="info",
     )
