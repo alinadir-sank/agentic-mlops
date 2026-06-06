@@ -118,7 +118,7 @@ _generator_state: dict[str, Any] = {
 # ── pydantic models ───────────────────────────────────────────────────────────
 
 class RunRequest(BaseModel):
-    model_id:    str = os.getenv("DEFAULT_MODEL_ID", "fraud-classifier-v1")
+    model_id:    str = os.getenv("DEFAULT_MODEL_ID", "main.default.fraud_classifier_v1")
     environment: str = "production"
 
 

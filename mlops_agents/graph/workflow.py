@@ -30,7 +30,7 @@ from langgraph.types import interrupt
 # checkpointed state survives between the initial interrupted run and resume.
 _checkpointer = MemorySaver()
 
-from state import AgentState
+from mlops_agents.state import AgentState
 from mlops_agents.rag.store import RAGStore
 from mlops_agents.agents.monitor_agent import monitor_agent
 from mlops_agents.agents.diagnosis_agent import diagnosis_agent

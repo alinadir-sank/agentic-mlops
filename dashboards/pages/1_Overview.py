@@ -4,10 +4,15 @@ dashboard/pages/1_Overview.py
 Overview page — model health, trigger run, live pipeline status.
 """
 
+import os
 import time
 import streamlit as st
 import requests
+from dotenv import load_dotenv
 from utils.session import init_session
+
+load_dotenv()
+DEFAULT_MODEL_ID = os.getenv("DEFAULT_MODEL_ID", "main.default.fraud_classifier_v1")
 
 init_session()
 
@@ -168,7 +173,7 @@ with st.container():
     with tc1:
         model_id = st.text_input(
             "Model ID",
-            value="fraud-classifier-v1",
+            value=DEFAULT_MODEL_ID,
             key="trigger_model_id",
             label_visibility="visible",
         )

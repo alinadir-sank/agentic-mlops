@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from mlops_agents.llm_manager import get_llm
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from state import AgentState
+from mlops_agents.state import AgentState
 from mlops_agents.rag.store import RAGStore
 from mlops_agents.tools.mcp_tools import send_slack_notification, send_email_alert
 from mlops_agents.agents.threshold_manager import run_threshold_update
@@ -165,7 +165,7 @@ def _llm_executive_summary(state: AgentState, report: str) -> str:
         return response.content.strip()
 
     except Exception as exc:
-        logger.warning("LLM summary failed: %s — using template", exc)
+        logger.info("LLM summary failed: %s — using template", exc)
 
         metrics: dict = state.get("metrics") or {}
 
@@ -195,7 +195,10 @@ def reporting_agent(state: AgentState, rag: RAGStore) -> AgentState:
     model_id: str = state.get("model_id") or metadata.get("model_name", "unknown")
     environment: str = state.get("environment", "production")
 
-    logger.info("Reporting Agent: generating incident report for %s (%s)", model_id, environment)
+    logger.info(
+        "[Reporting] starting — model_id=%s environment=%s severity=%s",
+        model_id, environment, severity,
+    )
 
     # 1. Historical Stats retrieval from vector layer
     historical_stats = rag.get_incident_stats(
@@ -224,7 +227,10 @@ def reporting_agent(state: AgentState, rag: RAGStore) -> AgentState:
 
     # Save clean, optimized document footprint to RAG
     incident_id = rag.save_incident(vector_safe_state)
-    logger.info("Saved compact incident snapshot to RAG database. Assigned ID: %s", incident_id)
+    logger.info(
+        "[Reporting] persisted incident — id=%s report_len=%d chars",
+        incident_id, len(report),
+    )
 
     # Replace temp tokens with valid incident identifiers
     report = report.replace("pending", incident_id, 1)
@@ -244,7 +250,7 @@ def reporting_agent(state: AgentState, rag: RAGStore) -> AgentState:
             if slack_result.get("status") == "success":
                 notifications.append("slack")
         except Exception as err:
-            logger.warning("Slack reporting interface bypassed or error encountered: %s", err)
+            logger.info("Slack reporting interface bypassed or error encountered: %s", err)
 
     # 5. Email Alert Dispatch Handling (Disabled via Env Flags based on your context)
     email_min_severity = os.getenv("EMAIL_MIN_SEVERITY", "major")
@@ -264,16 +270,24 @@ def reporting_agent(state: AgentState, rag: RAGStore) -> AgentState:
             if email_result.get("status") == "success":
                 notifications.append("email")
         except Exception as err:
-            logger.warning("Email reporting interface bypassed or error encountered: %s", err)
+            logger.info("Email reporting interface bypassed or error encountered: %s", err)
 
-    logger.info("Reporting sequence complete. incident_id=%s notifications=%s", incident_id, notifications)
+    logger.info(
+        "[Reporting] notifications dispatched — incident_id=%s notifications=%s",
+        incident_id, notifications or "none",
+    )
 
     # 6. Threshold learning (Feeds tuned boundary rules back into RAG for Monitor Node ingestion)
-    print(f"[Reporting Agent] Initiating threshold optimization for model {model_id} in environment {environment}")
+    logger.info("[Reporting] starting threshold optimization — model_id=%s environment=%s", model_id, environment)
     try:
         run_threshold_update(state, rag)
     except Exception as exc:
-        logger.error("Dynamic threshold tuning optimizer failed: %s", exc)
+        logger.info("Dynamic threshold tuning optimizer failed: %s", exc)
+
+    logger.info(
+        "[Reporting] complete — incident_id=%s notifications=%s",
+        incident_id, notifications or "none",
+    )
 
     return {
         **state,

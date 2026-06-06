@@ -8,7 +8,7 @@ from mlops_agents.llm_manager import get_llm
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from state import AgentState
+from mlops_agents.state import AgentState
 from mlops_agents.rag.store import RAGStore
 
 logger = logging.getLogger(__name__)
@@ -152,7 +152,9 @@ def diagnosis_agent(state: AgentState, rag: RAGStore) -> AgentState:
     environment: str = state.get("environment", "production")
 
     logger.info(
-        "Diagnosis Agent: Executing hybrid analysis for model: %s", model_id)
+        "[Diagnosis] starting — model_id=%s environment=%s severity=%s",
+        model_id, environment, severity,
+    )
 
     # Short-circuit logic if monitor flags no anomalies
     if severity == "none":
@@ -179,6 +181,11 @@ def diagnosis_agent(state: AgentState, rag: RAGStore) -> AgentState:
     relevant_runbooks = rag.query_runbooks(query_text=query_text, n_results=2)
     trend = rag.query_recent_metrics(
         model_id=model_id, n_results=5, environment=environment)
+
+    logger.info(
+        "[Diagnosis] RAG retrieval — similar_incidents=%d runbooks=%d trend_points=%d",
+        len(similar_incidents or []), len(relevant_runbooks or []), len(trend or []),
+    )
 
     system_prompt = "You are an autonomous MLOps Diagnostic engine. Synthesize incident logs, vector runbooks, and abstract feature distributions to resolve root cause anomalies into structured formats."
 
@@ -227,15 +234,20 @@ Instructions: Formulate a cohesive root cause evaluation by contrasting data his
             HumanMessage(content=prompt)
         ])
     except Exception as exc:
-        logger.error(
-            "Structured LLM compilation failure. Executing safe hardcoded fallback: %s", exc)
+        logger.info(
+            "[Diagnosis] structured LLM call failed — falling back to investigate. exc=%s", exc)
         return {
             **state,
             "diagnosis": "Fallback: Suspected performance degradation triggered safety loop.",
             "remediation_action": "investigate"
         }
 
-    print(f"[Diagnosis Agent] LLM Structured Output: {result.model_dump_json()}")
+    logger.info(
+        "[Diagnosis] result — root_cause=%r category=%s action=%s confidence=%.2f",
+        result.root_cause, result.root_cause_category,
+        result.recommended_action, result.confidence,
+    )
+    logger.info("[Diagnosis] full structured output: %s", result.model_dump_json())
 
     # Materialize prescription parameters for safe hand-off to remediation agent tools
     prescription = result.retrain_prescription.model_dump(
@@ -251,6 +263,13 @@ Instructions: Formulate a cohesive root cause evaluation by contrasting data his
     }
     workflow_action_token = action_map.get(
         result.recommended_action, "investigate")
+
+    logger.info(
+        "[Diagnosis] complete — workflow_action=%s drifted_features=%s prescription=%s",
+        workflow_action_token,
+        drifted,
+        "present" if prescription else "none",
+    )
 
     return {
         **state,

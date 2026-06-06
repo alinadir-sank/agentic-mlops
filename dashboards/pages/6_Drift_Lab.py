@@ -478,7 +478,10 @@ if active_ds_meta:
         try:
             r = requests.post(
                 f"{API}/runs",
-                json={"model_id": "fraud-classifier-v1", "environment": "production"},
+                json={
+                    "model_id": os.getenv("DEFAULT_MODEL_ID", "main.default.fraud_classifier_v1"),
+                    "environment": "production",
+                },
                 timeout=120,
             )
             r.raise_for_status()
