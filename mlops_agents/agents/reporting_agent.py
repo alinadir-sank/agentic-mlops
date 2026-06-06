@@ -13,7 +13,7 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from langchain_ollama import ChatOllama
+from mlops_agents.llm_manager import get_llm
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from state import AgentState
@@ -140,14 +140,7 @@ def _llm_executive_summary(state: AgentState, report: str) -> str:
     Ask the LLM to write a concise executive summary for Slack.
     """
 
-    model_name = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
-    ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-
-    llm = ChatOllama(
-        model=model_name,
-        base_url=ollama_url,
-        temperature=0,
-    )
+    llm = get_llm(temperature=0)
 
     try:
         response = llm.invoke(

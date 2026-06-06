@@ -4,7 +4,7 @@ import json
 import logging
 import os
 from typing import Any, Literal, Optional
-from langchain_ollama import ChatOllama
+from mlops_agents.llm_manager import get_llm
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
@@ -118,11 +118,7 @@ class DiagnosisOutput(BaseModel):
 
 
 def _build_diagnosis_llm():
-    model_name = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
-    ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    return ChatOllama(
-        model=model_name, base_url=ollama_url, temperature=0
-    ).with_structured_output(DiagnosisOutput)
+    return get_llm(temperature=0).with_structured_output(DiagnosisOutput)
 
 
 def _format_similar_incidents(incidents: list) -> str:

@@ -5,7 +5,7 @@ import json
 import logging
 import os
 from typing import Any, Literal
-from langchain_ollama import ChatOllama
+from mlops_agents.llm_manager import get_llm
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field, field_validator, ValidationError
 
@@ -87,15 +87,8 @@ def _get_thresholds(model_id: str, rag: RAGStore) -> dict:
 
 def _build_severity_llm() -> Any:
     from tenacity import retry_if_exception_type
-    model_name = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
-    ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-
     return (
-        ChatOllama(
-            model=model_name,
-            base_url=ollama_url,
-            temperature=0
-        )
+        get_llm(temperature=0)
         .with_structured_output(SeverityClassification)
         .with_retry(
             retry_if_exception_type=

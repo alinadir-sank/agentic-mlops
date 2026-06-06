@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Optional, Self
 from pydantic import BaseModel, Field, field_validator, model_validator, ValidationError
 
-from langchain_ollama import ChatOllama
+from mlops_agents.llm_manager import get_llm
 from langchain_core.messages import HumanMessage, SystemMessage
 from state import AgentState
 from mlops_agents.rag.store import RAGStore
@@ -96,14 +96,7 @@ def _llm_threshold_advisor(
 ) -> dict:
     """Invokes structured compiler over low-token formatted datasets."""
     from tenacity import retry_if_exception_type
-    model_name = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
-    ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-
-    llm = ChatOllama(
-        model=model_name,
-        base_url=ollama_url,
-        temperature=0,
-    ).with_structured_output(ThresholdAdjustment).with_retry(
+    llm = get_llm(temperature=0).with_structured_output(ThresholdAdjustment).with_retry(
         retry_if_exception_type=(ValidationError, Exception),
         stop_after_attempt=3,
         wait_exponential_jitter=True,
