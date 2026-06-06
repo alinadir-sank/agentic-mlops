@@ -44,9 +44,11 @@ load_dotenv()
 
 start = time.time()
 
+root = Path(__file__).parent.parent
+
 # ── core config ───────────────────────────────────────────────────────────────
-DATA_PATH    = Path("./data/creditcard.csv")
-MODEL_DIR    = Path("./model")
+DATA_PATH    = Path(root / "data" / "creditcard.csv")
+MODEL_DIR    = Path(root / "model")
 MODEL_PATH   = MODEL_DIR / "fraud_classifier.joblib"
 SCALER_PATH  = MODEL_DIR / "scaler.joblib"
 AMOUNT_SCALER_PATH = MODEL_DIR / "amount_scaler.joblib"
