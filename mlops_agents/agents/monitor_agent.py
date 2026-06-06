@@ -99,17 +99,23 @@ def _build_severity_llm() -> Any:
     )
 
 def monitor_agent(state: AgentState, rag: RAGStore) -> AgentState:
-    model_id = "main.default.fraud_classifier_v1"
+    model_id = state.get("model_id") or os.getenv(
+        "DEFAULT_MODEL_ID", "main.default.fraud_classifier_v1"
+    )
     environment = state.get("environment", os.getenv("DEFAULT_ENVIRONMENT", "production"))
     model_version = state.get("model_version", os.getenv("DEFAULT_MODEL_VERSION", "1"))
-    
+
     if not model_id:
         raise ValueError("state['model_id'] is a missing dependency context.")
 
-    # Explicitly configure backend connection URI before client initialization
+    # Explicitly configure backend connection URI before client initialization.
+    # Only propagate the token if it's actually set — writing an empty string
+    # into the env makes MLflow auth treat it as a present-but-empty token,
+    # which fails differently from "unset" and breaks token-less auth modes.
     tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
-    token        = os.getenv("MLFLOW_TRACKING_TOKEN", "")
-    os.environ["MLFLOW_TRACKING_TOKEN"] = token
+    token = os.getenv("MLFLOW_TRACKING_TOKEN")
+    if token:
+        os.environ["MLFLOW_TRACKING_TOKEN"] = token
     mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_registry_uri("databricks-uc")
     client = MlflowClient()
@@ -213,9 +219,14 @@ TASK: Evaluate the data inside <current_metrics> using <alert_thresholds> and <h
     metrics["production_histograms"] = prod_histograms
     metrics["monitored_features_list"]  = [f"V{i}" for i in range(1, 29)] + ["Amount_scaled", "Time_scaled"]
     active_dataset_path = Path(__file__).parent.parent / "data" / "active_dataset.json"
-    active_dataset_name = "baseline" 
-    with open(active_dataset_path, "r") as f:
-        active_dataset_name = json.load(f).get("dataset", "baseline")
+    active_dataset_name = "baseline"
+    try:
+        with open(active_dataset_path, "r") as f:
+            active_dataset_name = json.load(f).get("dataset", "baseline")
+    except FileNotFoundError:
+        logger.info("active_dataset.json not found at %s — defaulting to '%s'.", active_dataset_path, active_dataset_name)
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Could not read active_dataset.json (%s) — defaulting to '%s'.", exc, active_dataset_name)
     metrics["active_dataset"] = active_dataset_name
 
     # Add a unified metadata footprint that matches what the model server uses

@@ -37,17 +37,21 @@ def _build_report(state: AgentState, historical_stats: dict) -> str:
     metrics: dict = state.get("metrics") or {}
     diag_json: dict = state.get("diagnosis_json") or {}
     similar = state.get("similar_incidents") or []
+    metadata: dict = metrics.get("metadata") or {}
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    model_id = metrics.get("model_id", "unknown")
-    environment = metrics.get("environment", "production")
+    # Monitor stores model_id/environment at top-level state and inside
+    # metrics["metadata"]; they are NOT keys of `metrics` itself.
+    model_id = state.get("model_id") or metadata.get("model_name", "unknown")
+    environment = state.get("environment") or "production"
+    model_version = state.get("model_version") or metadata.get("model_version", "unknown")
     severity = state.get("severity", "none")
 
     report_lines = [
         f"# Incident Report — {model_id}",
         "",
         f"**Date:** {now}  ",
-        f"**Model:** `{model_id}` v{metrics.get('model_version', 'unknown')}  ",
+        f"**Model:** `{model_id}` v{model_version}  ",
         f"**Environment:** {environment}  ",
         f"**Severity:** {severity.upper()}  ",
         f"**Incident ID:** `{state.get('incident_id', 'pending')}`",
