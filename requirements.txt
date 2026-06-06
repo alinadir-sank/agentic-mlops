@@ -26,8 +26,7 @@ python-dotenv==1.0.0
 
 # HTTP
 requests>=2.31.0
-httpx==0.27.2
-
+httpx>=0.28.1,<1.0.0
 # Kubernetes (for scale/rollback tools)
 kubernetes>=29.0.0
 
