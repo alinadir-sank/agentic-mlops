@@ -9,3 +9,4 @@ local_dev/**
 *.egg-info/**
 rag_data/**
 mlops_agents/data/**
+fraud_model_server/model_server/model/**
