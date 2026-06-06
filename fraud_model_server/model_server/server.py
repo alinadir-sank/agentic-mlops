@@ -50,7 +50,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── config ────────────────────────────────────────────────────────────────────
-MODEL_DIR    = Path(os.getenv("MODEL_DIR", "./model"))
+MODEL_DIR    = Path(__file__).parent / "model"
 MODEL_PATH   = MODEL_DIR / "fraud_classifier.joblib"
 AMOUNT_SCALER_PATH = MODEL_DIR / "amount_scaler.joblib"
 TIME_SCALER_PATH   = MODEL_DIR / "time_scaler.joblib"
