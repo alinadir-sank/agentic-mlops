@@ -77,11 +77,13 @@ DEPLOYMENT_STRATEGY  = os.getenv("DEPLOYMENT_STRATEGY", "canary") # canary | blu
 
 MODEL_DIR.mkdir(exist_ok=True)
 
-if DRIFT_DATASET and Path(f"../../mlops_agents/data/datasets/{DRIFT_DATASET}.csv").exists():
-    DATA_PATH = Path(f"./data/datasets/{DRIFT_DATASET}.csv")
+
+dataset_path = Path(__file__).parent.parent.parent.parent / "mlops_agents/data/datasets"
+if DRIFT_DATASET and Path( dataset_path / f"{DRIFT_DATASET}.csv").exists():
+    DATA_PATH = Path( dataset_path / f"{DRIFT_DATASET}.csv")
     print(f"Training on drifted dataset: {DRIFT_DATASET}")
 else:
-    DATA_PATH = Path("../../mlops_agents/data/datasets/baseline.csv")
+    DATA_PATH = Path( dataset_path / "baseline.csv")
 
 print(f"\n{'='*60}")
 print(f"  Fraud Classifier Training")
