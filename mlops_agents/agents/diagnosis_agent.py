@@ -284,6 +284,25 @@ Instructions: Formulate a cohesive root cause evaluation by contrasting data his
     )
     if prescription is not None:
         prescription["drifted_features"] = drifted
+        logger.info(
+            "[Diagnosis] retrain prescription — strategy=%s window_days=%s "
+            "drift_period_weight=%s exclude_before=%r refit_preprocessors=%s "
+            "optimize_for=%s target_recall=%s target_roc_auc=%s "
+            "deployment_strategy=%s canary_pct=%s shadow_hours=%s "
+            "drifted_features=%s",
+            prescription.get("data_strategy"),
+            prescription.get("window_days"),
+            prescription.get("drift_period_weight"),
+            prescription.get("exclude_before"),
+            prescription.get("refit_preprocessors"),
+            prescription.get("optimize_for"),
+            prescription.get("target_recall"),
+            prescription.get("target_roc_auc"),
+            prescription.get("deployment_strategy"),
+            prescription.get("canary_traffic_pct"),
+            prescription.get("shadow_period_hours"),
+            drifted,
+        )
 
     # Map the output tokens to fit your updated remediation routing signatures
     action_map = {

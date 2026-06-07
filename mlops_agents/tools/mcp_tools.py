@@ -82,6 +82,9 @@ def trigger_retraining_pipeline(
 
         local_env = os.environ.copy()
         local_env.update({
+            # Disable Python's stdio block-buffering so train.py prints reach
+            # the log file in real time and aren't lost on a crash mid-import.
+            "PYTHONUNBUFFERED":    "1",
             "MODEL_ID":            str(model_id),
             "ENVIRONMENT":         str(environment),
             "TRIGGERED_BY":        str(triggered_by),
@@ -241,28 +244,102 @@ def trigger_retraining_pipeline(
         logger.error("trigger_retraining_pipeline failed: %s", exc)
         return {"status": "failed", "detail": str(exc)}
     
+# Max wall-clock age before a held lock is presumed dead and cleaned up.
+# Overridable via env so this can be tuned for long training runs.
+_MAX_LOCK_AGE_SECONDS = int(os.getenv("RETRAIN_LOCK_MAX_AGE_SECONDS", str(2 * 3600)))
+
+
+def _is_zombie(pid: int) -> bool:
+    """
+    Return True iff `pid` is a Linux zombie (state 'Z' in /proc/<pid>/stat).
+
+    `os.kill(pid, 0)` returns success on zombies because the PID is still in
+    the process table — but the process is dead and cannot do anything.
+    """
+    try:
+        stat_line = Path(f"/proc/{pid}/stat").read_text()
+        # Format: pid (comm) state ... — comm may contain spaces/parens, so
+        # parse from the LAST ')' which terminates the comm field.
+        after_comm = stat_line.rsplit(") ", 1)[-1]
+        state = after_comm.split(" ", 1)[0]
+        return state == "Z"
+    except (FileNotFoundError, PermissionError, OSError):
+        return False  # not Linux, or can't read; assume not zombie
+
+
+def _clean_stale_lock(reason: str) -> None:
+    """Remove the lockfile and log why."""
+    logger.info("[LOCAL CHECK] cleaning stale retrain lockfile — %s", reason)
+    Path(LOCKFILE_PATH).unlink(missing_ok=True)
+
+
 def _is_retrain_in_progress() -> bool:
-    """Checks for active local lockfile or cloud workflow status."""
-    if os.getenv("LOCAL_MODE", "false").lower() == "true":
-        lock_file = Path(LOCKFILE_PATH)
-        if lock_file.exists():
-            try:
-                lock_data = json.loads(lock_file.read_text())
-                pid = lock_data.get("pid")
-                if pid:
-                    os.kill(pid, 0)  # Validates if PID is active in OS
-                    logger.info(f"[LOCAL CHECK] Retrain active. Found process PID: {pid}")
-                    return True
-            except ProcessLookupError:
-                logger.warning(f"[LOCAL CHECK] Stale lockfile found (PID {pid} dead). Cleaning up.")
-                lock_file.unlink(missing_ok=True)
-            except Exception as e:
-                logger.error(f"Error checking local training lockfile: {e}")
-                return True
-        return False
-    
-    else:
+    """
+    Decide whether a retrain is currently active.
+
+    In local mode the lockfile is the source of truth. Several stale states
+    must be detected explicitly — `os.kill(pid, 0)` alone is not enough:
+      • zombie children (Z state) — process is dead but still in the table
+      • lock older than _MAX_LOCK_AGE_SECONDS — assume crashed without cleanup
+      • PID dead (ProcessLookupError) — original case
+    """
+    if os.getenv("LOCAL_MODE", "false").lower() != "true":
         return _is_retrain_in_progress_gh()
+
+    lock_file = Path(LOCKFILE_PATH)
+    if not lock_file.exists():
+        return False
+
+    try:
+        lock_data = json.loads(lock_file.read_text())
+    except Exception as exc:
+        _clean_stale_lock(f"unreadable lockfile ({exc})")
+        return False
+
+    pid = lock_data.get("pid")
+    if not pid:
+        _clean_stale_lock("no pid field")
+        return False
+
+    # 1. Age check — covers crashes that left the lockfile behind even when the
+    #    PID was recycled by an unrelated process.
+    started_at_raw = lock_data.get("started_at")
+    if started_at_raw:
+        try:
+            started = datetime.fromisoformat(started_at_raw)
+            age = (datetime.now(timezone.utc) - started).total_seconds()
+            if age > _MAX_LOCK_AGE_SECONDS:
+                _clean_stale_lock(
+                    f"age {int(age)}s > max {_MAX_LOCK_AGE_SECONDS}s (pid={pid})"
+                )
+                return False
+        except (TypeError, ValueError):
+            # Bad timestamp — don't trust the lock either way; clean it.
+            _clean_stale_lock(f"unparseable started_at={started_at_raw!r}")
+            return False
+
+    # 2. Liveness check.
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        _clean_stale_lock(f"pid {pid} dead")
+        return False
+    except PermissionError:
+        # PID exists but is owned by another user. Can't tell what it is —
+        # safest to treat as active and wait for the age check to age it out.
+        logger.info("[LOCAL CHECK] pid %s owned by another user — treating as active", pid)
+        return True
+    except Exception as exc:
+        logger.info("[LOCAL CHECK] unexpected error checking pid %s: %s — treating as active", pid, exc)
+        return True
+
+    # 3. Zombie check — kill(pid,0) succeeds on zombies. Reap and clean.
+    if _is_zombie(pid):
+        _clean_stale_lock(f"pid {pid} is a zombie (defunct)")
+        return False
+
+    logger.info("[LOCAL CHECK] retrain active — pid=%s started_at=%s", pid, started_at_raw)
+    return True
 
 
 def _is_retrain_in_progress_gh() -> bool:

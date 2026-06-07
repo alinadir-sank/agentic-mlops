@@ -274,17 +274,24 @@ with g1:
     active_name = next((d["name"] for d in datasets if d.get("active")), "baseline")
     dataset_names = [d["name"] for d in datasets] if datasets else ["baseline"]
 
-    # Streamlit prefers session_state over `index=` once a widget has a `key`,
-    # so we sync the persisted value whenever the API's active dataset changes.
-    # Tracking the previous active value means manual selectbox changes made
-    # AFTER activation are still preserved on subsequent reruns.
+    # Drive the selectbox via session_state (no `index=` arg — Streamlit warns
+    # when both are set on a keyed widget). We seed session_state when:
+    #   • it's missing entirely (first render),
+    #   • its value is no longer a valid option (stale after dataset list shrank),
+    #   • the API's active dataset just changed (so activation takes effect).
+    # Manual selectbox changes made between activations are preserved.
     prev_active = st.session_state.get("_drift_lab_prev_active")
-    if active_name != prev_active:
-        st.session_state["gen_dataset_sel"] = active_name
+    if (
+        "gen_dataset_sel" not in st.session_state
+        or st.session_state["gen_dataset_sel"] not in dataset_names
+        or active_name != prev_active
+    ):
+        st.session_state["gen_dataset_sel"] = (
+            active_name if active_name in dataset_names else dataset_names[0]
+        )
         st.session_state["_drift_lab_prev_active"] = active_name
 
-    default_idx = dataset_names.index(active_name) if active_name in dataset_names else 0
-    sel_dataset = st.selectbox("Dataset", dataset_names, index=default_idx, key="gen_dataset_sel")
+    sel_dataset = st.selectbox("Dataset", dataset_names, key="gen_dataset_sel")
 with g2:
     rate = st.selectbox("Rate (req/s)", [1, 2, 5, 10, 20], index=1, key="gen_rate")
 with g3:
