@@ -6,14 +6,17 @@ langchain-ollama>=0.1.0
 langchain-google-genai>=2.0.0
 
 # API / Web
-fastapi==0.115.0
+# Upgrade FastAPI to lift Starlette up to >=0.40.0 for Streamlit 1.58+
+fastapi>=0.115.4  
 uvicorn[standard]==0.30.6
 pydantic==2.9.2
+# Bind websockets to satisfy langgraph-sdk 0.4.2
+websockets>=14.0,<16.0  
 
 # Data / ML
 scikit-learn==1.5.2
 imbalanced-learn==0.12.3
-numpy==1.26.4
+numpy>=1.26,<2.3
 pandas==2.2.3
 scipy==1.14.1
 joblib==1.4.2
@@ -26,7 +29,9 @@ python-dotenv==1.0.0
 
 # HTTP
 requests>=2.31.0
-httpx>=0.28.1,<1.0.0
+# Enforce minimum floor required by google-genai 2.8.0
+httpx>=0.28.1,<1.0.0  
+
 # Kubernetes (for scale/rollback tools)
 kubernetes>=29.0.0
 
@@ -42,7 +47,7 @@ azure-ai-ml>=1.13.0
 sendgrid>=6.11.0
 
 # Streamlit dashboards
-streamlit
+streamlit>=1.58.0
 
 # Databricks
 databricks-sdk
