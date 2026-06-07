@@ -473,6 +473,11 @@ with mlflow.start_run(run_name=run_name):
     print(f"MLflow auto-assigned version ID: {new_version_num}")
     
     mlflow.log_artifact(str(META_PATH))
+    # Scalers must travel with the model — watch_for_retrain reloads them
+    # alongside model + metadata so the new LR coefficients see correctly
+    # scaled features at inference time.
+    mlflow.log_artifact(str(AMOUNT_SCALER_PATH))
+    mlflow.log_artifact(str(TIME_SCALER_PATH))
 
     # Save per-feature reference histograms for drift computation
     # 10-15 bins is the sweet spot for a 1b LLM's context window

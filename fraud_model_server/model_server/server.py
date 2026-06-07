@@ -213,8 +213,88 @@ def _retry_download(label: str, fn, attempts: int = 3, delay_seconds: int = 10):
     raise last_exc
 
 
+def _check_and_swap_latest_retrain() -> bool:
+    """
+    Find the latest retrain run in MLflow and atomically swap model + scalers
+    + metadata into the server's state.
+
+    Returns:
+        True  → a swap occurred (new run picked up)
+        False → no new run (already on the latest) or no retrain runs exist
+
+    Exceptions during artifact download/load propagate to the caller so it can
+    decide whether to retry (background watcher) or proceed anyway (startup).
+    """
+    client     = MlflowClient()
+    experiment = client.get_experiment_by_name(EXPERIMENT)
+    if not experiment:
+        return False
+
+    runs = client.search_runs(
+        experiment_ids=[experiment.experiment_id],
+        filter_string=(
+            f"tags.triggered_by IN ('remediation_agent','manual') and tags.model_id = '{MODEL_ID}'"
+        ),
+        order_by=["start_time DESC"],
+        max_results=1,
+    )
+    if not runs:
+        return False
+
+    latest        = runs[0]
+    latest_run_id = latest.info.run_id
+
+    with state_lock:
+        if latest_run_id == state.get("loaded_run_id"):
+            return False
+
+        print(f"\n[watcher] new retrained model — run {latest_run_id}")
+
+        # 1. Model (hard requirement — failure raises and aborts the swap)
+        new_model = _retry_download(
+            f"model download (run {latest_run_id[:8]})",
+            lambda: mlflow.sklearn.load_model(f"runs:/{latest_run_id}/model"),
+        )
+
+        # 2. Scalers (HARD requirement — train.py refits these every run.
+        # If we keep stale v(N-1) scalers, v(N) LR coefficients receive
+        # mis-scaled features and the model silently underperforms.)
+        tmpdir = tempfile.mkdtemp()
+        _retry_download(
+            f"amount_scaler download (run {latest_run_id[:8]})",
+            lambda: client.download_artifacts(latest_run_id, "amount_scaler.joblib", tmpdir),
+        )
+        _retry_download(
+            f"time_scaler download (run {latest_run_id[:8]})",
+            lambda: client.download_artifacts(latest_run_id, "time_scaler.joblib", tmpdir),
+        )
+        new_amount_scaler = joblib.load(Path(tmpdir) / "amount_scaler.joblib")
+        new_time_scaler   = joblib.load(Path(tmpdir) / "time_scaler.joblib")
+
+        # 3. Metadata (soft requirement — fall back to existing if download fails)
+        metadata = state["metadata"]
+        try:
+            _retry_download(
+                f"metadata.json download (run {latest_run_id[:8]})",
+                lambda: client.download_artifacts(latest_run_id, "metadata.json", tmpdir),
+            )
+            metadata = json.loads((Path(tmpdir) / "metadata.json").read_text())
+        except Exception as e:
+            print(f"[watcher] warning: failed to download metadata.json for run {latest_run_id}, using existing metadata")
+            print(f"[watcher] error: {e}")
+
+        # 4. Atomic swap — model, scalers, and metadata all move together.
+        state["model"]          = new_model
+        state["amount_scaler"]  = new_amount_scaler
+        state["time_scaler"]    = new_time_scaler
+        state["loaded_run_id"]  = latest_run_id
+        state["metadata"]       = metadata
+        print(f"[watcher] model + scalers hot-reloaded.\n")
+        return True
+
+
 def watch_for_retrain():
-    """Background thread — polls MLflow for a model tagged triggered_by=remediation_agent."""
+    """Background thread — polls MLflow on RELOAD_CHECK intervals."""
     token = os.getenv("MLFLOW_TRACKING_TOKEN", "")
     if token:
         os.environ["MLFLOW_TRACKING_TOKEN"] = token
@@ -223,52 +303,7 @@ def watch_for_retrain():
     while True:
         time.sleep(RELOAD_CHECK)
         try:
-            client     = MlflowClient()
-            experiment = client.get_experiment_by_name(EXPERIMENT)
-            if not experiment:
-                continue
-
-            runs = client.search_runs(
-                experiment_ids=[experiment.experiment_id],
-                filter_string=(
-                    f"tags.triggered_by IN ('remediation_agent','manual') and tags.model_id = '{MODEL_ID}'"
-                ),
-                order_by=["start_time DESC"],
-                max_results=1,
-            )
-            if not runs:
-                continue
-
-            latest        = runs[0]
-            latest_run_id = latest.info.run_id
-
-            with state_lock:
-                if latest_run_id == state["loaded_run_id"]:
-                    continue
-
-                print(f"\n[watcher] new retrained model — run {latest_run_id}")
-                new_model = _retry_download(
-                    f"model download (run {latest_run_id[:8]})",
-                    lambda: mlflow.sklearn.load_model(f"runs:/{latest_run_id}/model"),
-                )
-                metadata = state["metadata"]
-                try:
-                    tmpdir = tempfile.mkdtemp()
-                    _retry_download(
-                        f"metadata.json download (run {latest_run_id[:8]})",
-                        lambda: client.download_artifacts(latest_run_id, "metadata.json", tmpdir),
-                    )
-                    metadata_path = Path(tmpdir) / "metadata.json"
-                    metadata = json.loads(metadata_path.read_text())
-                except Exception as e:
-                    print(f"[watcher] warning: failed to download metadata.json for run {latest_run_id}, using existing metadata")
-                    print(f"[watcher] error: {e}")
-
-                state["model"]           = new_model
-                state["loaded_run_id"]   = latest_run_id
-                state["metadata"] = metadata
-                print(f"[watcher] model hot-reloaded.\n")
-
+            _check_and_swap_latest_retrain()
         except Exception as e:
             print(f"[watcher] error: {e}")
 
@@ -295,6 +330,20 @@ async def lifespan(app: FastAPI):
     print(f"Loaded model  : {metadata['model_type']}")
     print(f"Train samples : {metadata['train_samples']}")
     print(f"Trained at    : {metadata['trained_at']}")
+
+    # Immediate MLflow sync — the on-disk model may be stale relative to what
+    # an external trainer (Databricks, another worker) has registered since the
+    # last restart. If MLflow has a newer retrain, swap to it before serving
+    # any traffic. If MLflow is unreachable or empty, we keep the on-disk model
+    # and the background watcher will retry on its own cadence.
+    mlflow.set_tracking_uri(MLFLOW_URI)
+    try:
+        if _check_and_swap_latest_retrain():
+            print("[watcher] startup: synced to latest MLflow retrain")
+        else:
+            print("[watcher] startup: on-disk model is current (no newer MLflow run)")
+    except Exception as e:
+        print(f"[watcher] startup: MLflow sync failed, continuing with on-disk model — {e}")
 
     t = threading.Thread(target=watch_for_retrain, daemon=True)
     t.start()
