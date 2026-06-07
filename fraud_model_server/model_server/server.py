@@ -37,10 +37,10 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from collections import deque
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from mlflow.tracking import MlflowClient
 
@@ -283,6 +283,10 @@ app = FastAPI(
 # ── pydantic models ───────────────────────────────────────────────────────────
 
 class Transaction(BaseModel):
+    # Allow the generator to send `_true_label` alongside the features — the
+    # field name can't start with underscore in Python, hence the alias.
+    model_config = ConfigDict(populate_by_name=True)
+
     v1: float;  v2: float;  v3: float;  v4: float;  v5: float
     v6: float;  v7: float;  v8: float;  v9: float;  v10: float
     v11: float; v12: float; v13: float; v14: float; v15: float
@@ -291,6 +295,9 @@ class Transaction(BaseModel):
     v26: float; v27: float; v28: float
     amount: float = Field(..., ge=0)
     time:   float = Field(..., ge=0)
+    # Ground-truth label, supplied by the dataset replayer for evaluation.
+    # None in real production traffic — handled gracefully by metric code.
+    true_label: Optional[int] = Field(default=None, alias="_true_label")
 
 class MCPCallRequest(BaseModel):
     tool:   str
@@ -359,7 +366,7 @@ def compute_current_metrics() -> dict:
         return {
             "fraud_rate":  0.0,
             "latency_ms":  0.0,
-            "error_rate":  error_rate,   # real — from serving stats even at zero
+            "error_rate":  error_rate,
             "sample_size": 0,
             "precision":   base.get("precision", 0.0),
             "recall":      base.get("recall", 0.0),
@@ -368,31 +375,71 @@ def compute_current_metrics() -> dict:
             "accuracy":    base.get("accuracy", 0.0),
         }
 
-    # ── live computation ──────────────────────────────────────────────────────
-    high_conf = sum(
-        1 for h in history
-        if h["fraud_prob"] > 0.7 or h["fraud_prob"] < 0.3
-    )
-    accuracy   = round(high_conf / len(history), 4)
+    # ── window-wide stats (label-independent) ────────────────────────────────
     fraud_rate = round(
         sum(1 for h in history if h["prediction"] == 1) / len(history), 4
     )
-
     latencies   = list(stats["latencies_ms"])
     p95_latency = (
         round(float(np.percentile(latencies, 95)), 2)
         if latencies else 0.0
     )
 
+    # ── classification metrics from labelled records ─────────────────────────
+    # Records without a `true_label` (real production traffic) are skipped —
+    # those metrics fall back to training-time values from the registry.
+    labelled = [h for h in history if h.get("true_label") is not None]
+
+    if not labelled:
+        return {
+            "fraud_rate":  fraud_rate,
+            "latency_ms":  p95_latency,
+            "error_rate":  error_rate,
+            "sample_size": len(history),
+            "labelled_size": 0,
+            "precision":   base.get("precision", 0.0),
+            "recall":      base.get("recall", 0.0),
+            "f1":          base.get("f1", 0.0),
+            "roc_auc":     base.get("roc_auc", 0.0),
+            "accuracy":    base.get("accuracy", 0.0),
+        }
+
+    y_true = np.array([int(h["true_label"]) for h in labelled])
+    y_pred = np.array([int(h["prediction"]) for h in labelled])
+    y_prob = np.array([float(h["fraud_prob"]) for h in labelled])
+
+    tp = int(((y_pred == 1) & (y_true == 1)).sum())
+    fp = int(((y_pred == 1) & (y_true == 0)).sum())
+    fn = int(((y_pred == 0) & (y_true == 1)).sum())
+
+    accuracy  = round(float((y_pred == y_true).mean()), 4)
+    precision = round(tp / (tp + fp), 4) if (tp + fp) > 0 else 0.0
+    recall    = round(tp / (tp + fn), 4) if (tp + fn) > 0 else 0.0
+    f1 = (
+        round(2 * precision * recall / (precision + recall), 4)
+        if (precision + recall) > 0 else 0.0
+    )
+
+    # roc_auc requires both classes present in y_true — otherwise undefined.
+    try:
+        from sklearn.metrics import roc_auc_score
+        roc_auc = (
+            round(float(roc_auc_score(y_true, y_prob)), 4)
+            if len(np.unique(y_true)) == 2 else base.get("roc_auc", 0.0)
+        )
+    except Exception:
+        roc_auc = base.get("roc_auc", 0.0)
+
     return {
         "fraud_rate":  fraud_rate,
         "latency_ms":  p95_latency,
         "error_rate":  error_rate,
         "sample_size": len(history),
-        "precision":   base.get("precision", 0.0),
-        "recall":      base.get("recall", 0.0),
-        "f1":          base.get("f1", 0.0),
-        "roc_auc":     base.get("roc_auc", 0.0),
+        "labelled_size": len(labelled),
+        "precision":   precision,
+        "recall":      recall,
+        "f1":          f1,
+        "roc_auc":     roc_auc,
         "accuracy":    accuracy,
     }
 
@@ -408,6 +455,7 @@ async def predict(tx: Transaction):
         record = {
             "transaction_id": tx_id,
             "timestamp":      datetime.now(timezone.utc).isoformat(),
+            "true_label":     tx.true_label,  # None for real production traffic
             **result,
         }
 
