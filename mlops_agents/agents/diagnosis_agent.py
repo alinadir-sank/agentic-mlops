@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from mlops_agents.state import AgentState
 from mlops_agents.rag.store import RAGStore
+from mlops_agents.tools.histogram_drift import compute_histogram_drift
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +170,27 @@ def diagnosis_agent(state: AgentState, rag: RAGStore) -> AgentState:
     ref_histograms = metrics.get("reference_histograms")
     prod_histograms = metrics.get("production_histograms")
 
+    # ── Deterministic drift quantification via @tool ────────────────────────
+    drift = compute_histogram_drift.invoke({
+        "reference": ref_histograms or {},
+        "production": prod_histograms or {},
+    })
+    logger.info(
+        "[Diagnosis] drift — %s drifted_features=%s",
+        drift["summary"], drift["drifted_features"][:10],
+    )
+
+    # Compact, LLM-readable rendering of the drift result. Raw histograms are
+    # no longer pushed into the prompt — the math already happened in code.
+    if drift["top_drifted"]:
+        drift_table = "\n".join(
+            f"- {row['feature']}: PSI={row['psi']:.3f} KS={row['ks']:.3f} "
+            f"mean_shift_z={row['mean_shift_z']:.2f} → {row['drift_level']}"
+            for row in drift["top_drifted"]
+        )
+    else:
+        drift_table = "No features exceed the moderate-drift threshold (PSI ≥ 0.10)."
+
     # Build context lookup keys for RAG spaces
     query_text = (
         f"Model {model_id} in {environment}. Severity: {severity}. "
@@ -187,7 +209,7 @@ def diagnosis_agent(state: AgentState, rag: RAGStore) -> AgentState:
         len(similar_incidents or []), len(relevant_runbooks or []), len(trend or []),
     )
 
-    system_prompt = "You are an autonomous MLOps Diagnostic engine. Synthesize incident logs, vector runbooks, and abstract feature distributions to resolve root cause anomalies into structured formats."
+    system_prompt = "You are an autonomous MLOps Diagnostic engine. Synthesize incident logs, vector runbooks, and pre-computed drift statistics to resolve root cause anomalies into structured formats."
 
     prompt = f"""## Active Operational Incident Context
 Model Name: {model_id}
@@ -197,12 +219,15 @@ Severity Tier: {severity}
 ### Dynamic Performance Telemetry Signals
 {json.dumps({k: v for k, v in metrics.items() if k not in ['reference_histograms', 'production_histograms']}, indent=2)}
 
-### Statistical Feature Distribution Shapes (Zero-PII Summaries)
-Reference Baseline Histograms (Training Set Footprint):
-{json.dumps(ref_histograms) if ref_histograms else "UNAVAILABLE"}
+### Feature Distribution Drift (pre-computed via PSI / KS / mean-shift)
+Summary: {drift["summary"]}
 
-Live Production Histograms (Recent Sliding Buffer Footprint):
-{json.dumps(prod_histograms) if prod_histograms else "UNAVAILABLE"}
+Top drifted features (PSI ≥ 0.10 — production vs. training):
+{drift_table}
+
+Drift bands: PSI < 0.10 stable · 0.10–0.25 moderate · ≥ 0.25 significant.
+Use these statistics as ground truth — do NOT re-derive them. The list above
+is sorted by PSI descending.
 
 ### Institutional Knowledge Base (RAG Matches)
 Similar Past Operational Outages:
@@ -249,10 +274,16 @@ Instructions: Formulate a cohesive root cause evaluation by contrasting data his
     )
     logger.info("[Diagnosis] full structured output: %s", result.model_dump_json())
 
-    # Materialize prescription parameters for safe hand-off to remediation agent tools
+    # Materialize prescription parameters for safe hand-off to remediation agent tools.
+    # The tool's drifted_features list is the authoritative one — overlay it onto
+    # the LLM's prescription so retraining targets the features the maths flagged.
     prescription = result.retrain_prescription.model_dump(
     ) if result.retrain_prescription else None
-    drifted = prescription.get("drifted_features", []) if prescription else []
+    drifted = drift["drifted_features"] or (
+        prescription.get("drifted_features", []) if prescription else []
+    )
+    if prescription is not None:
+        prescription["drifted_features"] = drifted
 
     # Map the output tokens to fit your updated remediation routing signatures
     action_map = {
@@ -271,6 +302,7 @@ Instructions: Formulate a cohesive root cause evaluation by contrasting data his
         "present" if prescription else "none",
     )
 
+    per_feature = drift.get("per_feature", {})
     return {
         **state,
         "diagnosis":            result.root_cause,
@@ -281,6 +313,8 @@ Instructions: Formulate a cohesive root cause evaluation by contrasting data his
         "recommended_action":   result.recommended_action,
         "retrain_prescription": prescription,
         "drifted_features":     drifted,
+        "per_feature_psi":      {f: m["psi"] for f, m in per_feature.items()},
+        "per_feature_ks":       {f: m["ks"]  for f, m in per_feature.items()},
         "similar_incidents":    similar_incidents,
         "relevant_runbooks":    relevant_runbooks,
         "messages": state.get("messages", []) + [HumanMessage(content=f"[Diagnosis] Cause='{result.root_cause}' Category={result.root_cause_category} Action={result.recommended_action}")
