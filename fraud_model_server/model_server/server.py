@@ -289,7 +289,22 @@ def _check_and_swap_latest_retrain() -> bool:
         state["time_scaler"]    = new_time_scaler
         state["loaded_run_id"]  = latest_run_id
         state["metadata"]       = metadata
-        print(f"[watcher] model + scalers hot-reloaded.\n")
+
+        # 5. Drain the prediction window. Records left from the previous model
+        # would otherwise dominate compute_current_metrics for up to
+        # `maxlen` predictions (≈8–80 min depending on replay rate), causing
+        # the monitor to attribute prior-model behaviour to the new model and
+        # potentially trigger a spurious retrain. A clean window means the
+        # next snapshot returns the training-time fallback from metadata until
+        # enough fresh labelled records accumulate.
+        state["prediction_history"].clear()
+        state["feature_history"].clear()
+        state["stats"]["total_predictions"] = 0
+        state["stats"]["fraud_detected"]    = 0
+        state["stats"]["errors"]            = 0
+        state["stats"]["latencies_ms"].clear()
+
+        print(f"[watcher] model + scalers hot-reloaded; prediction window cleared.\n")
         return True
 
 
