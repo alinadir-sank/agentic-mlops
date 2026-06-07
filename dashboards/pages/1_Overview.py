@@ -416,7 +416,10 @@ try:
             format_func=lambda x: x[:24] + "…" if x != "—" and len(x) > 24 else x,
             key="run_selector",
         )
-        if selected != "—":
+        # Only rerun when the selection differs from the current active thread —
+        # the selectbox value is persisted under `key`, so an unconditional
+        # `st.rerun()` here loops forever (the next render reads the same value).
+        if selected != "—" and selected != st.session_state.get("active_thread_id"):
             st.session_state["active_thread_id"] = selected
             st.rerun()
 
