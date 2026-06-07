@@ -147,7 +147,7 @@ def _apply_node_output(thread_id: str, node_name: str, node_out: dict) -> None:
         "incident_id", "report", "remediation_action", "remediation_detail",
         "diagnosis_json", "retrain_prescription", "drifted_features",
         "similar_incidents", "relevant_runbooks", "notifications_sent",
-        "human_approved",
+        "human_approved", "postmortem_runbook_id",
     ):
         if field in node_out:
             runs[thread_id][field] = node_out[field]

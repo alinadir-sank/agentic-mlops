@@ -64,6 +64,7 @@ class AgentState(TypedDict, total=False):
     report: str                      # Final markdown incident report
     notifications_sent: Optional[list[str]]  # ["slack", "email", …]
     incident_id: Optional[str]       # ChromaDB incident ID after save
+    postmortem_runbook_id: Optional[str]  # Set when LLM gate promoted incident to a runbook
 
     # ── LangGraph message history ────────────────────────────────────────────
     messages: Annotated[list, add_messages]
