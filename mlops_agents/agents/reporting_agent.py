@@ -20,6 +20,7 @@ from mlops_agents.state import AgentState
 from mlops_agents.rag.store import RAGStore
 from mlops_agents.tools.mcp_tools import send_slack_notification, send_email_alert
 from mlops_agents.tools.token_tracker import TokenUsageHandler
+from mlops_agents.tools.alert_decider import decide_slack_alert
 from mlops_agents.agents.threshold_manager import run_threshold_update
 
 logger = logging.getLogger(__name__)
@@ -212,10 +213,23 @@ def reporting_agent(state: AgentState, rag: RAGStore) -> AgentState:
     # 2. Build report string context payload layout
     report = _build_report(state, historical_stats)
 
+    # Generate an LLM executive summary and prepend to the report before saving.
+    reporting_tracker = TokenUsageHandler()
+    try:
+        executive_summary = _llm_executive_summary(state, report, reporting_tracker)
+    except Exception as err:
+        logger.info("Executive summary generation failed: %s", err)
+        executive_summary = None
+
+    if executive_summary:
+        report = (
+            f"## Executive Summary\n\n{executive_summary}\n\n---\n\n" + report
+        )
+
     # 3. CRITICAL STRUCTURAL ADJUSTMENT: Prepare a vector-optimized state copy.
     # We strip out the heavy histogram arrays so we don't bloat the vector database metadata attributes.
     sanitized_metrics = {
-        k: v for k, v in metrics.items() 
+        k: v for k, v in metrics.items()
         if k not in ["reference_histograms", "production_histograms"]
     }
     # Track metadata summary stats instead of heavy matrices
@@ -225,7 +239,8 @@ def reporting_agent(state: AgentState, rag: RAGStore) -> AgentState:
     vector_safe_state = {
         **state,
         "metrics": sanitized_metrics,
-        "report": report
+        "report": report,
+        "executive_summary": executive_summary or "",
     }
 
     # Save clean, optimized document footprint to RAG
@@ -241,18 +256,23 @@ def reporting_agent(state: AgentState, rag: RAGStore) -> AgentState:
     # 4. Slack Channels Notification Handlers (Disabled via Env Flags based on your context)
     notifications: list[str] = []
     slack_enabled = os.getenv("SLACK_NOTIFICATIONS_ENABLED", "false").lower() == "true"
-    reporting_tracker = TokenUsageHandler()
 
     if slack_enabled:
         try:
-            summary = _llm_executive_summary(state, report, reporting_tracker)
-            slack_result = send_slack_notification(
-                message=summary,
-                severity=severity,
-                incident_id=incident_id,
-            )
-            if slack_result.get("status") == "success":
-                notifications.append("slack")
+            # Ask LLM whether this incident should trigger Slack.
+            decision = decide_slack_alert(state, report, reporting_tracker)
+            if not decision.get("alert"):
+                logger.info("LLM decided not to alert Slack: %s", decision.get("reason"))
+            else:
+                # Use existing executive summary if available, otherwise generate one.
+                summary = executive_summary or _llm_executive_summary(state, report, reporting_tracker)
+                slack_result = send_slack_notification(
+                    message=summary,
+                    severity=severity,
+                    incident_id=incident_id,
+                )
+                if slack_result.get("status") == "success":
+                    notifications.append("slack")
         except Exception as err:
             logger.info("Slack reporting interface bypassed or error encountered: %s", err)
 
