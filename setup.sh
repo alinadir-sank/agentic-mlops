@@ -192,7 +192,24 @@ if [[ "$LLM_PROVIDER" == "ollama" || -n "${OLLAMA_EMBED_MODEL:-}" ]]; then
     ensure_model "$OLLAMA_EMBED_MODEL"  || exit 1
 fi
 
-# ── 5. Preflight only? ───────────────────────────────────────────────────────
+# ── 5. Dataset (Kaggle creditcardfraud) ──────────────────────────────────────
+# train.py and the scenario generators need the raw 284K-row creditcard.csv
+# from Kaggle. We don't download it automatically — just check and instruct.
+section "Dataset"
+DATASET_PATH="$PROJECT_ROOT/mlops_agents/data/creditcard.csv"
+if [[ -f "$DATASET_PATH" ]]; then
+    ok "creditcard.csv present at $DATASET_PATH"
+else
+    err "creditcard.csv NOT FOUND at $DATASET_PATH"
+    err "Download it from Kaggle (requires authenticated kaggle CLI):"
+    err ""
+    err "  kaggle datasets download mlg-ulb/creditcardfraud -p ./mlops_agents/data/ --unzip"
+    err ""
+    err "Trainer and scenario generators will fail until this file is present."
+    exit 1
+fi
+
+# ── 6. Preflight only? ───────────────────────────────────────────────────────
 if $CHECK_ONLY; then
     section "Preflight complete"
     ok "All checks passed (--check)"
