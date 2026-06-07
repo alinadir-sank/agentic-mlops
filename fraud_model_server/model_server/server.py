@@ -147,21 +147,24 @@ def mlflow_telemetry_worker():
                 "std":        float(arr[:, i].std()),
             }
 
-        # 3. Asynchronously push to the dynamically resolved model registry version tags
+        # 3. Asynchronously push to the dynamically resolved model registry version tags.
+        # NOTE: MLflow's `active_run()` is process-global, not thread-local. Using
+        # `with mlflow.start_run(...)` here races against the metrics-snapshot run
+        # created inside compute_current_metrics() when both fire near-simultaneously.
+        # We attach artifacts to the existing training run via the client API
+        # directly, which never touches the global active-run pointer.
         try:
             with tempfile.TemporaryDirectory() as tmpdir:
                 artifact_path = Path(tmpdir) / "latest_production_histogram.json"
                 artifact_path.write_text(json.dumps(production_histograms))
 
-                with mlflow.start_run(run_id=active_run_id):
-                    mlflow.log_artifact(str(artifact_path))
-                    # optional: keep a small pointer on the model version
-                    client.set_model_version_tag(
-                        name=model_name,
-                        version=active_version,
-                        key="latest_production_histogram_run_id",
-                        value=mlflow.active_run().info.run_id,
-                    )
+                client.log_artifact(run_id=active_run_id, local_path=str(artifact_path))
+                client.set_model_version_tag(
+                    name=model_name,
+                    version=active_version,
+                    key="latest_production_histogram_run_id",
+                    value=active_run_id,
+                )
         except Exception as exc:
             print(f"[Telemetry Worker Error] Failed to upload metrics to version {active_version}: {exc}")
 
@@ -186,6 +189,28 @@ def load_model_from_disk():
     time_scaler   = joblib.load(TIME_SCALER_PATH)
     metadata = json.loads(META_PATH.read_text())
     return model, amount_scaler, time_scaler, metadata
+
+
+def _retry_download(label: str, fn, attempts: int = 3, delay_seconds: int = 10):
+    """
+    Run a flaky MLflow artifact download with backoff. Returns the call result
+    on success or re-raises the last exception after `attempts` retries.
+    """
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts:
+                print(
+                    f"[watcher] {label} attempt {attempt}/{attempts} failed: {exc} "
+                    f"— retrying in {delay_seconds}s"
+                )
+                time.sleep(delay_seconds)
+            else:
+                print(f"[watcher] {label} failed after {attempts} attempts: {exc}")
+    raise last_exc
 
 
 def watch_for_retrain():
@@ -222,11 +247,17 @@ def watch_for_retrain():
                     continue
 
                 print(f"\n[watcher] new retrained model — run {latest_run_id}")
-                new_model = mlflow.sklearn.load_model(f"runs:/{latest_run_id}/model")
+                new_model = _retry_download(
+                    f"model download (run {latest_run_id[:8]})",
+                    lambda: mlflow.sklearn.load_model(f"runs:/{latest_run_id}/model"),
+                )
                 metadata = state["metadata"]
                 try:
                     tmpdir = tempfile.mkdtemp()
-                    client.download_artifacts(latest_run_id, "metadata.json", tmpdir)
+                    _retry_download(
+                        f"metadata.json download (run {latest_run_id[:8]})",
+                        lambda: client.download_artifacts(latest_run_id, "metadata.json", tmpdir),
+                    )
                     metadata_path = Path(tmpdir) / "metadata.json"
                     metadata = json.loads(metadata_path.read_text())
                 except Exception as e:

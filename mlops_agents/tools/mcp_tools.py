@@ -55,9 +55,9 @@ def trigger_retraining_pipeline(
     environment:     str,
     reason:          str,
     severity:        str          = "unknown",
-    prescription:    dict         = None,
+    prescription:    dict         = None,   
     current_metrics: dict         = None,
-    triggered_by:    str          = "mlops-agent",
+    triggered_by:    str          = "remediation_agent",
     active_dataset:  str          = "baseline",
 ) -> dict[str, Any]:
     """

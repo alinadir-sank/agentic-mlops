@@ -280,13 +280,32 @@ print("Training time:", time.time() - start)
 # Default threshold 0.5 is wrong for fraud — we optimise per prescription.
 y_proba = model.predict_proba(X_test)[:, 1]
 precisions_arr, recalls_arr, thresholds_arr = precision_recall_curve(y_test, y_proba)
+MIN_PRECISION = float(os.getenv("MIN_PRECISION", "0.10"))  # precision floor for recall optimisation
+
 if FULL_TRAIN:
     if OPTIMIZE_FOR == "recall":
-        # lowest threshold that achieves at least TARGET_RECALL
-        valid_mask        = recalls_arr[:-1] >= TARGET_RECALL
-        valid_thresholds  = thresholds_arr[valid_mask]
-        optimal_threshold = float(valid_thresholds.min()) if len(valid_thresholds) > 0 else 0.3
-        print(f"\nThreshold optimised for recall >= {TARGET_RECALL}")
+        # Lowest threshold that achieves TARGET_RECALL **while** keeping precision
+        # above the floor. The unconditional "lowest threshold for recall>=T" rule
+        # collapses to threshold≈0 on imbalanced data (the trivial predict-everything-
+        # as-fraud solution gives recall=1.0 but ~0.18% precision). If no threshold
+        # satisfies both, fall back to F2 — recall-weighted but precision-aware —
+        # so we never deploy a model that flags 100% of traffic.
+        valid_mask = (recalls_arr[:-1] >= TARGET_RECALL) & (precisions_arr[:-1] >= MIN_PRECISION)
+        valid_thresholds = thresholds_arr[valid_mask]
+        if len(valid_thresholds) > 0:
+            optimal_threshold = float(valid_thresholds.min())
+            print(
+                f"\nThreshold optimised for recall >= {TARGET_RECALL} "
+                f"with precision >= {MIN_PRECISION}"
+            )
+        else:
+            f2_scores = (5 * precisions_arr * recalls_arr) / \
+                        (4 * precisions_arr + recalls_arr + 1e-9)
+            optimal_threshold = float(thresholds_arr[np.argmax(f2_scores[:-1])])
+            print(
+                f"\nNo threshold satisfies recall>={TARGET_RECALL} & precision>={MIN_PRECISION} "
+                f"— falling back to F2 maximizer (threshold={optimal_threshold:.4f})"
+            )
 
     elif OPTIMIZE_FOR == "f2_score":
         # F2 weights recall twice as much as precision
