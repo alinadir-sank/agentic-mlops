@@ -37,6 +37,10 @@ _RULES: list[tuple[str, str, str, str]] = [
     ("accuracy",   "accuracy_critical",   "accuracy_major",   "<"),
     ("error_rate", "error_rate_critical", "error_rate_major", ">"),
     ("latency_ms", "latency_critical_ms", "latency_major_ms", ">"),
+    # Recall and ROC-AUC are the load-bearing signals under concept drift on
+    # imbalanced data — accuracy stays high while the model silently degrades.
+    ("recall",     "recall_critical",     "recall_major",     "<"),
+    ("roc_auc",    "roc_auc_critical",    "roc_auc_major",    "<"),
 ]
 
 _SEVERITY_ORDER = {"none": 0, "minor": 1, "major": 2, "critical": 3}

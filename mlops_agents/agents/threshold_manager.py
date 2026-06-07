@@ -14,12 +14,17 @@ logger = logging.getLogger(__name__)
 
 # Bounding boxes for clamping final outputs
 THRESHOLD_LIMITS = {
-    "accuracy_major": (0.6, 0.85),
-    "accuracy_critical": (0.5, 0.75),
-    "latency_major_ms": (500.0, 3000.0),
+    "accuracy_major":      (0.6, 0.85),
+    "accuracy_critical":   (0.5, 0.75),
+    "latency_major_ms":    (500.0, 3000.0),
     "latency_critical_ms": (1000.0, 5000.0),
-    "error_rate_major": (0.01, 0.2),
+    "error_rate_major":    (0.01, 0.2),
     "error_rate_critical": (0.05, 0.3),
+    # Recall and ROC-AUC bands — critical must stay strictly below major.
+    "recall_major":        (0.65, 0.85),
+    "recall_critical":     (0.50, 0.70),
+    "roc_auc_major":       (0.75, 0.92),
+    "roc_auc_critical":    (0.65, 0.82),
 }
 
 # ---------------------------------------------------------------------------
@@ -31,6 +36,10 @@ class MetricDeltas(BaseModel):
     accuracy_critical: Optional[float] = Field(default=0.0, description="Delta adjustment for critical accuracy.")
     error_rate_major: Optional[float] = Field(default=0.0, description="Delta adjustment for major error rate.")
     error_rate_critical: Optional[float] = Field(default=0.0, description="Delta adjustment for critical error rate.")
+    recall_major: Optional[float] = Field(default=0.0, description="Delta adjustment for major recall.")
+    recall_critical: Optional[float] = Field(default=0.0, description="Delta adjustment for critical recall.")
+    roc_auc_major: Optional[float] = Field(default=0.0, description="Delta adjustment for major ROC-AUC.")
+    roc_auc_critical: Optional[float] = Field(default=0.0, description="Delta adjustment for critical ROC-AUC.")
 
     # --- Millisecond Bounded Metrics (Absolute Time Scales) ---
     latency_major_ms: Optional[float] = Field(default=0.0, description="Delta adjustment for major latency in MILLISECONDS. Max step +/- 100.0ms.")
@@ -43,8 +52,10 @@ class MetricDeltas(BaseModel):
         Prevents millisecond values from hitting percentage ceilings.
         """
         pct_fields = [
-            "accuracy_major", "accuracy_critical", 
-            "error_rate_major", "error_rate_critical"
+            "accuracy_major", "accuracy_critical",
+            "error_rate_major", "error_rate_critical",
+            "recall_major", "recall_critical",
+            "roc_auc_major", "roc_auc_critical",
         ]
         
         # 1. Enforce strict 0.02 step limit on standard ratio metrics
@@ -78,15 +89,20 @@ def _clamp_thresholds(thresholds: dict) -> dict:
             thresholds[key] = max(low, min(high, float(thresholds[key])))
     return thresholds
 
-def _compute_accuracy_trend(trend: list[dict]) -> str:
-    """Compute trend direction for accuracy metric."""
+def _compute_metric_trend(trend: list[dict], metric_key: str) -> str:
+    """Direction of a metric over the recent telemetry window (newest first)."""
     if len(trend) < 3: return "flat"
-    vals = [m.get("accuracy", 0.0) for m in trend[:5] if m.get("accuracy") is not None]
+    vals = [m.get(metric_key) for m in trend[:5] if m.get(metric_key) is not None]
     if len(vals) < 3: return "flat"
-    # Index 0 is newest. If index 0 is less than index -1, accuracy is declining.
+    # Index 0 is newest. If index 0 < index -1 by >5%, the metric is declining.
     if vals[0] < vals[-1] * 0.95: return "declining"
     if vals[0] > vals[-1] * 1.05: return "improving"
     return "flat"
+
+
+# Backwards-compatible alias.
+def _compute_accuracy_trend(trend: list[dict]) -> str:
+    return _compute_metric_trend(trend, "accuracy")
 
 def _llm_threshold_advisor(
     state: AgentState,
@@ -114,8 +130,10 @@ def _llm_threshold_advisor(
 Your task: Propose minor metric alert threshold adjustments to balance sensitivity and false-positive fatigue.
 
 Rules:
-- For ratio/percentage metrics (accuracy, error_rate), max delta step is +/-0.02.
+- For ratio/percentage metrics (accuracy, error_rate, recall, roc_auc), max delta step is +/-0.02.
 - For latency metrics (latency_major_ms, latency_critical_ms), propose real millisecond adjustments (e.g., +25.0, -50.0). Max steps are limited to 100ms/200ms.
+- Higher-is-better metrics (accuracy, recall, roc_auc): NEGATIVE delta tightens (alerts earlier), POSITIVE relaxes.
+- Lower-is-better metrics (error_rate, latency_*): POSITIVE delta tightens (alerts earlier), NEGATIVE relaxes.
 
 Current baseline thresholds:
 {json.dumps(thresholds, indent=2)}
@@ -203,10 +221,17 @@ def run_threshold_update(state: AgentState, rag: RAGStore) -> None:
             thresholds[key] += eff_delta
             applied[key] = eff_delta
     
-    # Programmatic accuracy trend protection step
-    if _compute_accuracy_trend(trend) == "declining" and "accuracy_major" in thresholds:
-        logger.info("[Threshold] declining accuracy trend detected — auto-tightening accuracy_major for %s", model_id)
-        thresholds["accuracy_major"] -= (0.005 * lr) # Adjusted step size to prevent over-corrections
+    # Programmatic trend-protection step — for higher-is-better metrics, a
+    # sustained decline tightens the major threshold so we alert sooner on the
+    # next slide. Step size is dampened by the learning-rate `lr`.
+    for metric in ("accuracy", "recall", "roc_auc"):
+        major_key = f"{metric}_major"
+        if major_key in thresholds and _compute_metric_trend(trend, metric) == "declining":
+            logger.info(
+                "[Threshold] declining %s trend detected — auto-tightening %s for %s",
+                metric, major_key, model_id,
+            )
+            thresholds[major_key] -= (0.005 * lr)
 
     # Commit values back to database telemetry configurations
     clamped = _clamp_thresholds(thresholds)

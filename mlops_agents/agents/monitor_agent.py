@@ -57,6 +57,12 @@ THRESHOLDS = {
     "latency_major_ms":    lambda: _threshold("THRESHOLD_LATENCY_MAJOR_MS",   1000),
     "error_rate_critical": lambda: _threshold("THRESHOLD_ERROR_RATE_CRITICAL", 0.10),
     "error_rate_major":    lambda: _threshold("THRESHOLD_ERROR_RATE_MAJOR",    0.05),
+    # Recall — fraction of fraud caught. Critical when missing ≥ 40 % of fraud.
+    "recall_critical":     lambda: _threshold("THRESHOLD_RECALL_CRITICAL",    0.60),
+    "recall_major":        lambda: _threshold("THRESHOLD_RECALL_MAJOR",       0.75),
+    # ROC-AUC — discrimination ability. 0.5 = random, 1.0 = perfect.
+    "roc_auc_critical":    lambda: _threshold("THRESHOLD_ROC_AUC_CRITICAL",   0.75),
+    "roc_auc_major":       lambda: _threshold("THRESHOLD_ROC_AUC_MAJOR",      0.85),
 }
 
 
