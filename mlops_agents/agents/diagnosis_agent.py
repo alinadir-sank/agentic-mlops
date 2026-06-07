@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from mlops_agents.state import AgentState
 from mlops_agents.rag.store import RAGStore
 from mlops_agents.tools.histogram_drift import compute_histogram_drift
+from mlops_agents.tools.token_tracker import TokenUsageHandler
 
 logger = logging.getLogger(__name__)
 
@@ -252,18 +253,23 @@ NOTE: The possible actions you can recommend are strictly limited to the followi
 Instructions: Formulate a cohesive root cause evaluation by contrasting data histograms against baseline shapes and historical runbooks. Output strictly via the required JSON target model configuration layout."""
 
     llm = _build_diagnosis_llm()
+    tracker = TokenUsageHandler()
 
     try:
-        result: DiagnosisOutput = llm.invoke([
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=prompt)
-        ])
+        result: DiagnosisOutput = llm.invoke(
+            [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=prompt),
+            ],
+            config={"callbacks": [tracker]},
+        )
     except Exception as exc:
         logger.info(
             "[Diagnosis] structured LLM call failed — falling back to investigate. exc=%s", exc)
         return {
             **state,
             "diagnosis": "Fallback: Suspected performance degradation triggered safety loop.",
+            "token_usage": {"diagnosis": tracker.summary()},
             "remediation_action": "investigate"
         }
 
@@ -321,6 +327,14 @@ Instructions: Formulate a cohesive root cause evaluation by contrasting data his
         "present" if prescription else "none",
     )
 
+    token_summary = tracker.summary()
+    logger.info(
+        "[Diagnosis] token usage — in=%d out=%d total=%d calls=%d model=%s cost=$%.6f",
+        token_summary["input_tokens"], token_summary["output_tokens"],
+        token_summary["total_tokens"], token_summary["calls"],
+        token_summary["model"], token_summary["cost_usd"],
+    )
+
     per_feature = drift.get("per_feature", {})
     return {
         **state,
@@ -336,6 +350,7 @@ Instructions: Formulate a cohesive root cause evaluation by contrasting data his
         "per_feature_ks":       {f: m["ks"]  for f, m in per_feature.items()},
         "similar_incidents":    similar_incidents,
         "relevant_runbooks":    relevant_runbooks,
+        "token_usage":          {"diagnosis": token_summary},
         "messages": state.get("messages", []) + [HumanMessage(content=f"[Diagnosis] Cause='{result.root_cause}' Category={result.root_cause_category} Action={result.recommended_action}")
         ]
         }

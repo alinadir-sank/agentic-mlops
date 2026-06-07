@@ -19,6 +19,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from mlops_agents.state import AgentState
 from mlops_agents.rag.store import RAGStore
 from mlops_agents.tools.mcp_tools import send_slack_notification, send_email_alert
+from mlops_agents.tools.token_tracker import TokenUsageHandler
 from mlops_agents.agents.threshold_manager import run_threshold_update
 
 logger = logging.getLogger(__name__)
@@ -139,9 +140,10 @@ def _build_report(state: AgentState, historical_stats: dict) -> str:
 # Executive summary
 # ---------------------------------------------------------------------------
 
-def _llm_executive_summary(state: AgentState, report: str) -> str:
+def _llm_executive_summary(state: AgentState, report: str, tracker: TokenUsageHandler) -> str:
     """
     Ask the LLM to write a concise executive summary for Slack.
+    Token usage is routed into the caller-provided tracker.
     """
 
     llm = get_llm(temperature=0)
@@ -159,7 +161,8 @@ def _llm_executive_summary(state: AgentState, report: str) -> str:
                         f"Write a concise 3-sentence summary:\n\n{report[:1500]}"
                     )
                 ),
-            ]
+            ],
+            config={"callbacks": [tracker]},
         )
 
         return response.content.strip()
@@ -238,10 +241,11 @@ def reporting_agent(state: AgentState, rag: RAGStore) -> AgentState:
     # 4. Slack Channels Notification Handlers (Disabled via Env Flags based on your context)
     notifications: list[str] = []
     slack_enabled = os.getenv("SLACK_NOTIFICATIONS_ENABLED", "false").lower() == "true"
+    reporting_tracker = TokenUsageHandler()
 
     if slack_enabled:
         try:
-            summary = _llm_executive_summary(state, report)
+            summary = _llm_executive_summary(state, report, reporting_tracker)
             slack_result = send_slack_notification(
                 message=summary,
                 severity=severity,
@@ -279,8 +283,9 @@ def reporting_agent(state: AgentState, rag: RAGStore) -> AgentState:
 
     # 6. Threshold learning (Feeds tuned boundary rules back into RAG for Monitor Node ingestion)
     logger.info("[Reporting] starting threshold optimization — model_id=%s environment=%s", model_id, environment)
+    threshold_tracker = TokenUsageHandler()
     try:
-        run_threshold_update(state, rag)
+        run_threshold_update(state, rag, tracker=threshold_tracker)
     except Exception as exc:
         logger.info("Dynamic threshold tuning optimizer failed: %s", exc)
 
@@ -289,11 +294,22 @@ def reporting_agent(state: AgentState, rag: RAGStore) -> AgentState:
         incident_id, notifications or "none",
     )
 
+    reporting_summary = reporting_tracker.summary()
+    threshold_summary = threshold_tracker.summary()
+    logger.info(
+        "[Reporting] token usage — reporting=%s threshold_manager=%s",
+        reporting_summary, threshold_summary,
+    )
+
     return {
         **state,
         "report": report,
         "incident_id": incident_id,
         "notifications_sent": notifications,
+        "token_usage": {
+            "reporting":         reporting_summary,
+            "threshold_manager": threshold_summary,
+        },
         "messages": state.get("messages", []) + [
             HumanMessage(content=f"[Reporting] Compiled incident_id={incident_id}. Actions completed.")
         ]

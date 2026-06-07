@@ -109,6 +109,7 @@ def _llm_threshold_advisor(
     thresholds: dict,
     historical_stats: dict,
     trend: list[dict],
+    tracker=None,
 ) -> dict:
     """Invokes structured compiler over low-token formatted datasets."""
     from tenacity import retry_if_exception_type
@@ -153,11 +154,15 @@ Recent sliding telemetry run trends:
 {json.dumps(trend[:5], indent=2)}
 """
     logger.info("[Threshold Advisor] generated prompt:\n%s", prompt)
+    invoke_kwargs = {"config": {"callbacks": [tracker]}} if tracker is not None else {}
     try:
-        response = llm.invoke([
-            SystemMessage(content="You are an adaptive threshold schema tuner."),
-            HumanMessage(content=prompt),
-        ])
+        response = llm.invoke(
+            [
+                SystemMessage(content="You are an adaptive threshold schema tuner."),
+                HumanMessage(content=prompt),
+            ],
+            **invoke_kwargs,
+        )
         return response.model_dump()
     except Exception as exc:
         logger.info("[Threshold Advisor] all retry/backoff loops exhausted: %s", exc)
@@ -166,7 +171,7 @@ Recent sliding telemetry run trends:
 # ---------------------------------------------------------------------------
 # Main Execution Node Hook
 # ---------------------------------------------------------------------------
-def run_threshold_update(state: AgentState, rag: RAGStore) -> None:
+def run_threshold_update(state: AgentState, rag: RAGStore, tracker=None) -> None:
     metrics = state.get("metrics") or {}
     metadata = metrics.get("metadata") or {}
     model_id = state.get("model_id") or metadata.get("model_name", "unknown")
@@ -194,7 +199,7 @@ def run_threshold_update(state: AgentState, rag: RAGStore) -> None:
     # Learning Rate dampener
     lr = min(0.1, 1 / max(hist_stats.get("total", 1), 1))
 
-    proposal = _llm_threshold_advisor(state, thresholds, hist_stats, trend)
+    proposal = _llm_threshold_advisor(state, thresholds, hist_stats, trend, tracker=tracker)
     logger.info(
         "[Threshold] LLM proposal — should_update=%s confidence=%.2f reasoning=%s",
         proposal.get("should_update"),

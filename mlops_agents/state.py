@@ -15,6 +15,22 @@ from typing_extensions import TypedDict, Annotated
 from langgraph.graph.message import add_messages
 
 
+def _merge_token_usage(left: dict, right: dict) -> dict:
+    """Reducer: merge per-agent token-usage dicts by agent name.
+
+    Each agent emits its own slice (e.g. {"monitor": {...}}); the reducer
+    composes them so the final state.token_usage holds every agent's
+    contribution to the run.
+    """
+    if not left:
+        return dict(right or {})
+    if not right:
+        return dict(left or {})
+    merged = dict(left)
+    merged.update(right)  # later wins; agents only write their own keys
+    return merged
+
+
 class AgentState(TypedDict, total=False):
     # ── Runtime source metadata ──────────────────────────────────────────────
     # Injected by the entry-point before the graph is invoked.
@@ -61,3 +77,8 @@ class AgentState(TypedDict, total=False):
     per_feature_psi:       Optional[dict]   # PSI per feature — populated by diagnosis agent
     per_feature_ks:        Optional[dict]   # KS statistic per feature
     drifted_features:      Optional[list[str]]  # already exists — now computed not guessed
+
+    # ── LLM token + cost tracking ────────────────────────────────────────────
+    # Per-agent dict: {"monitor": {input_tokens, output_tokens, calls, model, cost_usd, ...}, ...}
+    # Reducer merges contributions from every agent that ran during the pipeline.
+    token_usage: Annotated[dict[str, dict], _merge_token_usage]

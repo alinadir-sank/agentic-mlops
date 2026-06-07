@@ -13,6 +13,7 @@ from mlops_agents.state import AgentState
 from mlops_agents.rag.store import RAGStore
 from mlops_agents.tools.metrics_source import fetch_model_metrics, MetricsSourceError
 from mlops_agents.tools.severity_classifier import classify_severity
+from mlops_agents.tools.token_tracker import TokenUsageHandler
 
 # NEW IMPORT: Add MLflow tracking library access
 import mlflow
@@ -200,11 +201,15 @@ def monitor_agent(state: AgentState, rag: RAGStore) -> AgentState:
     logger.info("[Monitor] narrative prompt:\n%s", narrative_prompt)
 
     llm = _build_narrative_llm()
+    tracker = TokenUsageHandler()
     try:
-        narrative = llm.invoke([
-            SystemMessage(content="You write concise factual MLOps incident summaries."),
-            HumanMessage(content=narrative_prompt),
-        ])
+        narrative = llm.invoke(
+            [
+                SystemMessage(content="You write concise factual MLOps incident summaries."),
+                HumanMessage(content=narrative_prompt),
+            ],
+            config={"callbacks": [tracker]},
+        )
         reasoning_text = narrative.reasoning
         confidence_value = narrative.confidence
     except Exception as exc:
@@ -256,6 +261,14 @@ def monitor_agent(state: AgentState, rag: RAGStore) -> AgentState:
         severity_value, model_id, environment,
     )
 
+    token_summary = tracker.summary()
+    logger.info(
+        "[Monitor] token usage — in=%d out=%d total=%d calls=%d model=%s cost=$%.6f",
+        token_summary["input_tokens"], token_summary["output_tokens"],
+        token_summary["total_tokens"], token_summary["calls"],
+        token_summary["model"], token_summary["cost_usd"],
+    )
+
     return {
         **state,
         "metrics": metrics,
@@ -264,6 +277,7 @@ def monitor_agent(state: AgentState, rag: RAGStore) -> AgentState:
         "model_version": model_version,
         "severity": severity_value,
         "thresholds": thresholds,
+        "token_usage": {"monitor": token_summary},
         "messages": state.get("messages", []) + [
             HumanMessage(content=f"[Monitor Agent] Classified status as {severity_value}. Reason: {reasoning_text}")
         ]

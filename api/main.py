@@ -158,6 +158,27 @@ def _apply_node_output(thread_id: str, node_name: str, node_out: dict) -> None:
             for m in node_out["messages"]
         ]
 
+    # Accumulate per-agent token usage and roll up totals. The LangGraph reducer
+    # already merges on the state side; we mirror it here so the run record
+    # (persisted to ChromaDB / shown in dashboard) stays consistent.
+    if "token_usage" in node_out:
+        existing = runs[thread_id].get("token_usage") or {}
+        incoming = node_out["token_usage"] or {}
+        existing.update(incoming)
+        runs[thread_id]["token_usage"] = existing
+
+        total_in   = sum(int(a.get("input_tokens",  0) or 0) for a in existing.values())
+        total_out  = sum(int(a.get("output_tokens", 0) or 0) for a in existing.values())
+        total_cost = sum(float(a.get("cost_usd",   0) or 0) for a in existing.values())
+        total_calls = sum(int(a.get("calls",       0) or 0) for a in existing.values())
+        runs[thread_id]["token_totals"] = {
+            "input_tokens":  total_in,
+            "output_tokens": total_out,
+            "total_tokens":  total_in + total_out,
+            "calls":         total_calls,
+            "cost_usd":      round(total_cost, 6),
+        }
+
 
 async def _drive_graph(thread_id: str, stream_input, rag) -> None:
     """
