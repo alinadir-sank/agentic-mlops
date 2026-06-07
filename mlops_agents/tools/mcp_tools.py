@@ -41,8 +41,9 @@ class ToolExecutionError(Exception):
 
 
 # Hardcoded absolute path reference as per your architecture spec
-SCRIPT_ABS_PATH = "/home/ali/fraud_model_server/model_server/scripts/train.py"
-LOCKFILE_ABS_PATH = "/home/ali/fraud_model_server/model_server/model/.retrain.lock"
+SCRIPT_PATH =  Path(__file__).parent.parent.parent / "fraud_model_server/model_server/scripts/train.py"
+LOCKFILE_PATH = Path(__file__).parent.parent.parent / "fraud_model_server/model_server/model/.retrain.lock"
+RETRAIN_LOG_DIR = Path(__file__).parent.parent.parent / "data/logs/retrain"
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +78,7 @@ def trigger_retraining_pipeline(
         # TARGET CWD: Set this to the parent folder of scripts (".../model_server")
         # This forces Path("./data/creditcard.csv") inside train.py to resolve to
         # /home/ali/fraud_model_server/model_server/data/creditcard.csv
-        target_cwd = str(Path(SCRIPT_ABS_PATH).parent.parent)
+        target_cwd = str(Path(SCRIPT_PATH).parent.parent)
 
         local_env = os.environ.copy()
         local_env.update({
@@ -98,34 +99,63 @@ def trigger_retraining_pipeline(
             "DEPLOYMENT_STRATEGY":   str(prescription.get("deployment_strategy", "canary")),
         })
 
+        # Redirect stdout/stderr into a timestamped, model-tagged log file so
+        # the API + dashboard can tail it. Path goes into the lockfile so the
+        # retrain-status endpoints can find it without filesystem scanning.
+        RETRAIN_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        # Sanitise model_id for the filename — strip non-alphanumeric.
+        safe_model = "".join(c if c.isalnum() else "_" for c in str(model_id))[:64]
+        log_path = RETRAIN_LOG_DIR / f"{ts}-{safe_model}.log"
+
         try:
-            # Launch background process asynchronously
+            log_fh = log_path.open("w", buffering=1)  # line-buffered
+            # Write a header so the consumer can see what triggered the run.
+            log_fh.write(
+                f"# retrain log — model_id={model_id} environment={environment}\n"
+                f"# started_at={datetime.now(timezone.utc).isoformat()} triggered_by={triggered_by}\n"
+                f"# strategy={prescription.get('data_strategy')} window={prescription.get('window_days')}d "
+                f"optimize_for={prescription.get('optimize_for')}\n"
+                f"# severity={severity} reason={reason!r}\n"
+                f"# ─────────────────────────────────────────────────────────────\n"
+            )
+            log_fh.flush()
+
+            # Launch background process; stderr merges into stdout for a single tail target.
             process = subprocess.Popen(
-                [sys.executable, SCRIPT_ABS_PATH],
+                [sys.executable, SCRIPT_PATH],
                 env=local_env,
                 cwd=target_cwd,  # Crucial alignment step
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
             )
 
             # Drop the local process lockfile tracking asset
             lock_payload = {
                 "pid": process.pid,
-                "started_at": Path(SCRIPT_ABS_PATH).stat().st_mtime, # Mock time or use datetime
-                "model_id": model_id
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "model_id": model_id,
+                "log_path": str(log_path),
             }
-            lock_file = Path(LOCKFILE_ABS_PATH)
+            lock_file = Path(LOCKFILE_PATH)
             lock_file.parent.mkdir(parents=True, exist_ok=True)
             lock_file.write_text(json.dumps(lock_payload))
 
-            logger.info(f"[LOCAL MODE] Successfully spawned train.py at PID: {process.pid}")
+            logger.info(
+                "[LOCAL MODE] spawned train.py — pid=%d log=%s",
+                process.pid, log_path,
+            )
             return {
                 "status": "success",
-                "detail": f"LOCAL SUCCESS: Training script spawned in background. PID={process.pid}",
-                "local_pid": process.pid
+                "detail": (
+                    f"LOCAL SUCCESS: Training script spawned in background. "
+                    f"PID={process.pid} log={log_path.name}"
+                ),
+                "local_pid": process.pid,
+                "log_path":  str(log_path),
             }
         except Exception as local_exc:
-            logger.error("[LOCAL MODE] Failed launching local training subprocess: %s", local_exc)
+            logger.info("[LOCAL MODE] Failed launching local training subprocess: %s", local_exc)
             return {"status": "failed", "detail": f"Local process spawn error: {local_exc}"}
 
     # ── 2. CLOUD GITHUB ACTIONS EXECUTION MODE (Original Fallback) ──────────
@@ -214,7 +244,7 @@ def trigger_retraining_pipeline(
 def _is_retrain_in_progress() -> bool:
     """Checks for active local lockfile or cloud workflow status."""
     if os.getenv("LOCAL_MODE", "false").lower() == "true":
-        lock_file = Path(LOCKFILE_ABS_PATH)
+        lock_file = Path(LOCKFILE_PATH)
         if lock_file.exists():
             try:
                 lock_data = json.loads(lock_file.read_text())

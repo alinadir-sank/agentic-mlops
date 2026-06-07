@@ -57,6 +57,8 @@ PROJECT_ROOT     = Path(__file__).parent.parent
 DATASETS_DIR     = PROJECT_ROOT / "mlops_agents" / "data" / "datasets"
 SCRIPTS_DIR = PROJECT_ROOT / "mlops_agents" / "scripts"
 ACTIVE_DATASET_FILE = PROJECT_ROOT / "mlops_agents" / "data" / "active_dataset.json"
+RETRAIN_LOG_DIR  = PROJECT_ROOT / "data" / "logs" / "retrain"
+RETRAIN_LOCK     = PROJECT_ROOT / "fraud_model_server" / "model_server" / "model" / ".retrain.lock"
 
 def _stop_generator_process() -> dict[str, Any]:
     """Stop the generator subprocess using the same logic as the HTTP endpoint."""
@@ -378,6 +380,127 @@ async def list_incidents(limit: int = 50, severity: str = None):
 
     except Exception as e:
         raise HTTPException(500, f"ChromaDB query failed: {e}")
+
+# ── retrain logs endpoint ─────────────────────────────────────────────────────
+
+def _resolve_active_log() -> tuple[Path | None, dict | None]:
+    """Read the retrain lockfile and return (log_path, lock_data) if active."""
+    if not RETRAIN_LOCK.exists():
+        return None, None
+    try:
+        lock = json.loads(RETRAIN_LOCK.read_text())
+    except Exception:
+        return None, None
+    p = lock.get("log_path")
+    return (Path(p) if p else None), lock
+
+
+def _latest_log() -> Path | None:
+    """Most recently modified file in RETRAIN_LOG_DIR, or None if empty."""
+    if not RETRAIN_LOG_DIR.exists():
+        return None
+    logs = sorted(
+        RETRAIN_LOG_DIR.glob("*.log"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return logs[0] if logs else None
+
+
+@app.get("/retrain/logs")
+async def retrain_logs(tail: int = 200, file: str | None = None):
+    """
+    Return the tail of a retrain log.
+
+    - `file`: explicit log filename under data/logs/retrain/ (no path traversal).
+              When omitted, prefer the active run's log from the lockfile,
+              else fall back to the most recently modified log.
+    - `tail`: number of trailing lines to return (default 200, capped at 5000).
+    """
+    tail = max(1, min(int(tail), 5000))
+
+    # explicit filename takes precedence
+    if file:
+        # sanitise — refuse anything with a separator
+        if "/" in file or "\\" in file or ".." in file:
+            raise HTTPException(400, "Invalid log filename")
+        log_path = RETRAIN_LOG_DIR / file
+        source = "explicit"
+    else:
+        active_path, lock = _resolve_active_log()
+        if active_path and active_path.exists():
+            log_path = active_path
+            source = "active"
+        else:
+            log_path = _latest_log()
+            source = "latest"
+
+    if not log_path or not log_path.exists():
+        return {
+            "status": "no_logs",
+            "log_path": None,
+            "lines": [],
+            "active": False,
+            "tail": tail,
+        }
+
+    # tail the file — read whole thing then take last N lines (logs are small,
+    # avoids complexity of seeking from end across encodings).
+    try:
+        content = log_path.read_text(errors="replace").splitlines()
+    except Exception as exc:
+        raise HTTPException(500, f"Could not read log: {exc}")
+
+    lines = content[-tail:] if len(content) > tail else content
+
+    # Is a retrain currently in flight against this log?
+    _, lock = _resolve_active_log()
+    active = bool(
+        lock and lock.get("log_path") == str(log_path) and _pid_alive(lock.get("pid"))
+    )
+
+    return {
+        "status":   "active" if active else "idle",
+        "log_path": str(log_path),
+        "log_name": log_path.name,
+        "source":   source,
+        "active":   active,
+        "size_bytes":  log_path.stat().st_size,
+        "modified_at": datetime.fromtimestamp(log_path.stat().st_mtime, tz=timezone.utc).isoformat(),
+        "total_lines": len(content),
+        "tail":     len(lines),
+        "lines":    lines,
+    }
+
+
+def _pid_alive(pid) -> bool:
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+@app.get("/retrain/logs/list")
+async def list_retrain_logs(limit: int = 20):
+    """List recent retrain log files (newest first)."""
+    if not RETRAIN_LOG_DIR.exists():
+        return []
+    logs = sorted(
+        RETRAIN_LOG_DIR.glob("*.log"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )[:max(1, int(limit))]
+    return [
+        {
+            "name":        p.name,
+            "size_bytes":  p.stat().st_size,
+            "modified_at": datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc).isoformat(),
+        }
+        for p in logs
+    ]
 
 # ── dataset endpoints ─────────────────────────────────────────────────────────
 

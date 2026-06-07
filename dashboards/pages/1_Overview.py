@@ -284,6 +284,47 @@ else:
             </div>
             """, unsafe_allow_html=True)
 
+        # training logs — show whenever the run kicked off a retrain. The
+        # training subprocess runs asynchronously, so the pipeline can be
+        # `completed` while training is still churning; we keep polling on
+        # the log endpoint's `active` flag rather than the run status.
+        train_log = None
+        if run.get("remediation_action") == "trigger_retraining":
+            try:
+                train_log = requests.get(
+                    f"{API}/retrain/logs",
+                    params={"tail": 200},
+                    timeout=5,
+                ).json()
+            except Exception as e:
+                st.caption(f"Could not fetch training logs: {e}")
+
+        if train_log and train_log.get("lines"):
+            indicator = "● TRAINING" if train_log.get("active") else "○ FINISHED"
+            indicator_color = "#00d4ff" if train_log.get("active") else "#555c72"
+            log_name = train_log.get("log_name", "—")
+            total = train_log.get("total_lines", 0)
+            shown = train_log.get("tail", 0)
+
+            st.markdown(f"""
+            <div style="margin-top:12px;padding:12px 16px;background:#111318;
+                        border:1px solid #1f2330;border-radius:6px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;
+                            font-size:0.65rem;color:#555c72;letter-spacing:0.12em;margin-bottom:8px;">
+                    <span>TRAINING LOGS</span>
+                    <span style="color:{indicator_color};">{indicator} · {log_name} · showing {shown} of {total}</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            # Render log lines in a monospace code block — preserves whitespace
+            # without us hand-rolling HTML escaping.
+            st.code("\n".join(train_log["lines"]), language="text")
+
+            # If training is still in flight, keep polling.
+            if train_log.get("active"):
+                time.sleep(3)
+                st.rerun()
+
         # retrain prescription
         if run.get("retrain_prescription"):
             p = run["retrain_prescription"]
